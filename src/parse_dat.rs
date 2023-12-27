@@ -1,12 +1,11 @@
 use crate::v2ray_config::domain::Type;
 use crate::v2ray_config::{Cidr, GeoIpList, GeoSiteList};
 
+use addr::{parse_dns_name, parse_domain_name};
 use anyhow::Result;
 use cidr::{Ipv4Cidr, Ipv6Cidr};
 use cidr_utils::combiner::{Ipv4CidrCombiner, Ipv6CidrCombiner};
 use prost::Message;
-use publicsuffix::Error;
-use publicsuffix::{List, Psl};
 use regex::Regex;
 use std::collections::HashSet;
 use std::fs::File;
@@ -40,7 +39,7 @@ enum SiteIp {
 }
 
 impl SiteIp {
-    fn identify(input: &str) -> SiteIp {
+    fn from_str(input: &str) -> SiteIp {
         let res = if let Ok(ip) = input.parse::<std::net::IpAddr>() {
             match ip {
                 std::net::IpAddr::V4(addr) => SiteIp::Ipv4Site(addr),
@@ -64,7 +63,6 @@ struct MatchProxy {
     regex_sites: Vec<Regex>,
     ipv4_combainer: Ipv4CidrCombiner,
     ipv6_combainer: Ipv6CidrCombiner,
-    publicsuffix_list: List,
 }
 
 impl Default for MatchProxy {
@@ -75,7 +73,6 @@ impl Default for MatchProxy {
             regex_sites: Vec::new(),
             ipv4_combainer: Ipv4CidrCombiner::new(),
             ipv6_combainer: Ipv6CidrCombiner::new(),
-            publicsuffix_list: List::new(),
         }
     }
 }
@@ -84,7 +81,6 @@ impl MatchProxy {
     pub fn from_geo_dat(
         gepip_file: Option<&PathBuf>,
         geo_siet_file: Option<&PathBuf>,
-        public_suffix_list_file: &str,
     ) -> Result<()> {
         let mut ipv4_combiner = Ipv4CidrCombiner::new();
         let mut ipv6_combiner = Ipv6CidrCombiner::new();
@@ -110,7 +106,6 @@ impl MatchProxy {
             }
         } else {
         }
-        let public_suffix_list: List = public_suffix_list_file.parse()?;
         let mut plain_site_set: HashSet<&'static str> = HashSet::new();
         let mut regex_sites: Vec<Regex> = Vec::new();
         let mut domain_set: HashSet<&'static str> = HashSet::new();
@@ -132,10 +127,9 @@ impl MatchProxy {
                                 regex_sites.push(Regex::new(domain.value.as_str()).unwrap())
                             }
                             _ => {
-                                let domain_root =
-                                    public_suffix_list.domain(b"www.xn--85x722f.xn--55qx5d.cn");
-                                if let Some(domain) = domain_root {
-                                    domain_set.insert(std::str::from_utf8(domain.as_bytes())?);
+                                let domain = parse_domain_name(domain.value.as_str())?;
+                                if let Some(domain) = domain.root() {
+                                    domain_set.insert(domain);
                                 }
                             }
                         }
@@ -168,20 +162,21 @@ impl MatchProxy {
         return false;
     }
 
-    fn domain_match_cn(&self, input_site: &str) -> Result<bool> {
-        let input_domain_root = self.publicsuffix_list.domain(input_site.as_bytes());
-        if let Some(input_domain_root) = input_domain_root {
-            if self
-                .domain_set
-                .contains(std::str::from_utf8(input_domain_root.as_bytes())?)
-            {
-                Ok(true)
-            } else {
-                Ok(false)
+    fn domain_match_cn(&self, input_site: &str) -> bool {
+        let domain: std::prelude::v1::Result<addr::domain::Name<'_>, addr::error::Error<'_>> =
+            parse_domain_name(input_site);
+        let res = match domain {
+            Ok(name) => {
+                let res = if let Some(_) = name.root() {
+                    true
+                } else {
+                    false
+                };
+                res
             }
-        } else {
-            Ok(false)
-        }
+            Err(_) => false,
+        };
+        res
     }
 
     fn match_cn_domain(&self, input_site: &str) -> bool {
@@ -189,19 +184,15 @@ impl MatchProxy {
             return true;
         } else {
             let match_res = self.domain_match_cn(input_site);
-            if let Ok(match_res) = match_res {
-                if match_res {
-                    true
-                } else {
-                    self.regex_match_cn(input_site)
-                }
+            if match_res {
+                return true;
             } else {
                 self.regex_match_cn(input_site)
             }
         }
     }
     fn is_match_cn(&self, site_or_ip: &str) -> bool {
-        let site_type = SiteIp::identify(site_or_ip);
+        let site_type = SiteIp::from_str(site_or_ip);
         match site_type {
             SiteIp::Ipv4Site(site) => self.ipv4_combainer.contains(&site),
             SiteIp::Ipv6Site(site) => self.ipv6_combainer.contains(&site),
@@ -226,11 +217,20 @@ impl MatchProxy {
 
 #[cfg(test)]
 mod tests {
+    use anyhow::Ok;
+
     use super::*;
 
     #[test]
-    fn it_works() {
+    fn it_works() -> Result<()> {
         // read_geoip_dat();
         // read_geo_site_dat();
+
+        use addr::{parse_dns_name, parse_domain_name};
+
+        let domain = parse_domain_name("www.baidu.com")?;
+        println!("root: {:?}", domain.root());
+
+        Ok(())
     }
 }
