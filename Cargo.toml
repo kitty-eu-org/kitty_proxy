@@ -6,10 +6,10 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-anyhow = {version = "1.0.76", features = ["std"]}
+anyhow = { version = "1.0.76", features = ["std"] }
 log = "0.4.14"
 pretty_env_logger = "0.5.0"
-serde = {version="1.0.193", features=["serde_derive"]}
+serde = { version = "1.0.193", features = ["serde_derive"] }
 snafu = "0.7.0"
 thiserror = "1.0.30"
 tokio = { version = "1.15.0", features = ["full"] }
@@ -17,6 +17,8 @@ prost = "0.7"
 prost-derive = "0.7"
 cidr-utils = "0.6.1"
 cidr = { version = "0.2.2", features = ["bitstring", "serde"] }
+publicsuffix = { version = "2.2.3", features = ["std"] }
+regex = "1.10.2"
 
 
 [build-dependencies]
