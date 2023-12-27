@@ -13,3 +13,12 @@ serde = {version="1.0.193", features=["serde_derive"]}
 snafu = "0.7.0"
 thiserror = "1.0.30"
 tokio = { version = "1.15.0", features = ["full"] }
+prost = "0.7"
+prost-derive = "0.7"
+cidr-utils = "0.6.1"
+cidr = { version = "0.2.2", features = ["bitstring", "serde"] }
+
+
+[build-dependencies]
+prost = "0.7"
+prost-build = "0.7"
