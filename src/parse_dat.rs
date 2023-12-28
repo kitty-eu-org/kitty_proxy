@@ -1,6 +1,7 @@
 use crate::v2ray_config::domain::Type;
 use crate::v2ray_config::{Cidr, GeoIpList, GeoSiteList};
 
+use addr::domain::Name;
 use addr::{parse_dns_name, parse_domain_name};
 use anyhow::Result;
 use cidr::{Ipv4Cidr, Ipv6Cidr};
@@ -58,8 +59,8 @@ impl SiteIp {
 }
 
 struct MatchProxy {
-    plain_site_set: HashSet<&'static str>,
-    domain_set: HashSet<&'static str>,
+    plain_site_set: HashSet<String>,
+    domain_set: HashSet<String>,
     regex_sites: Vec<Regex>,
     ipv4_combainer: Ipv4CidrCombiner,
     ipv6_combainer: Ipv6CidrCombiner,
@@ -77,10 +78,21 @@ impl Default for MatchProxy {
     }
 }
 
-impl MatchProxy {
+fn read_geosite_from_dat(geo_siet_file: Option<&PathBuf>) -> GeoSiteList {
+    if let Some(site_file) = geo_siet_file {
+        let mut file = File::open(site_file).expect("Failed to open file");
+        let mut content = Vec::new();
+        file.read_to_end(&mut content).expect("Failed to read file");
+        GeoSiteList::decode(&content[..]).expect("Failed to decode binary data")
+    } else {
+        GeoSiteList::default()
+    }
+}
+
+impl<'a> MatchProxy {
     pub fn from_geo_dat(
         gepip_file: Option<&PathBuf>,
-        geo_siet_file: Option<&PathBuf>,
+        geo_site_file: Option<&PathBuf>,
     ) -> Result<()> {
         let mut ipv4_combiner = Ipv4CidrCombiner::new();
         let mut ipv6_combiner = Ipv6CidrCombiner::new();
@@ -90,9 +102,9 @@ impl MatchProxy {
             file.read_to_end(&mut content).expect("Failed to read file");
             let geo_ips = GeoIpList::decode(&content[..]).expect("Failed to decode binary data");
 
-            for geo_ip in geo_ips.entry {
+            for geo_ip in geo_ips.entry.iter() {
                 if geo_ip.country_code.to_lowercase() == "cn" {
-                    for cidr in geo_ip.cidr {
+                    for cidr in &geo_ip.cidr {
                         if cidr.ip.len() == 4 {
                             let ipv4_cidr = Ipv4Cidr::from_str(cidr.to_string().as_str()).unwrap();
                             ipv4_combiner.push(ipv4_cidr);
@@ -106,38 +118,38 @@ impl MatchProxy {
             }
         } else {
         }
-        let mut plain_site_set: HashSet<&'static str> = HashSet::new();
+        let mut plain_site_set: HashSet<String> = HashSet::new();
         let mut regex_sites: Vec<Regex> = Vec::new();
-        let mut domain_set: HashSet<&'static str> = HashSet::new();
-        if let Some(geo_siet_file) = geo_siet_file {
-            let mut file = File::open(geo_siet_file).expect("Failed to open file");
-            let mut content = Vec::new();
-            file.read_to_end(&mut content).expect("Failed to read file");
-            let geo_sites =
-                GeoSiteList::decode(&content[..]).expect("Failed to decode binary data");
-            for geo_site in geo_sites.entry {
-                if geo_site.country_code.to_lowercase() == "cn" {
-                    for domain in geo_site.domain {
-                        let site_type = domain.r#type();
-                        match site_type {
-                            Type::Plain => {
-                                plain_site_set.insert(Box::leak(domain.value.into_boxed_str()));
-                            }
-                            Type::Regex => {
-                                regex_sites.push(Regex::new(domain.value.as_str()).unwrap())
-                            }
-                            _ => {
-                                let domain = parse_domain_name(domain.value.as_str())?;
-                                if let Some(domain) = domain.root() {
-                                    domain_set.insert(domain);
-                                }
+        let mut domain_set: HashSet<String> = HashSet::new();
+
+        let geo_sites = read_geosite_from_dat(geo_site_file).entry;
+        for geo_site in &geo_sites {
+            if geo_site.country_code.to_lowercase() == "cn" {
+                for domain in &geo_site.domain {
+                    let mut s: String = String::new();
+                    let site_type = domain.r#type();
+                    match site_type {
+                        Type::Plain => {
+                            domain.value.clone_into(&mut s);
+                            plain_site_set.insert(s);
+                        }
+                        Type::Regex => {
+                            domain.value.clone_into(&mut s);
+                            regex_sites.push(Regex::new(s.as_str())?)
+                        }
+                        _ => {
+                            let domain: Name<'a> = parse_domain_name(domain.value.as_str())?;
+                            if let Some(domain) = domain.root() {
+                                domain.clone_into(&mut s);
+                                domain_set.insert(s);
                             }
                         }
                     }
-                    break;
                 }
+                break;
             }
         }
+
         Ok(())
     }
 
