@@ -89,11 +89,11 @@ fn read_geosite_from_dat(geo_siet_file: Option<&PathBuf>) -> GeoSiteList {
     }
 }
 
-impl<'a> MatchProxy {
+impl MatchProxy {
     pub fn from_geo_dat(
         gepip_file: Option<&PathBuf>,
         geo_site_file: Option<&PathBuf>,
-    ) -> Result<()> {
+    ) -> Result<Self> {
         let mut ipv4_combiner = Ipv4CidrCombiner::new();
         let mut ipv6_combiner = Ipv6CidrCombiner::new();
         if let Some(gepip_file) = gepip_file {
@@ -123,26 +123,26 @@ impl<'a> MatchProxy {
         let mut domain_set: HashSet<String> = HashSet::new();
 
         let geo_sites = read_geosite_from_dat(geo_site_file).entry;
-        for geo_site in &geo_sites {
-            if geo_site.country_code.to_lowercase() == "cn" {
-                for domain in &geo_site.domain {
-                    let mut s: String = String::new();
+        for geo_site in geo_sites {
+            let geo_site_clone = geo_site.clone();
+            if geo_site_clone.country_code.to_lowercase() == "cn" {
+                for domain in geo_site_clone.domain {
                     let site_type = domain.r#type();
                     match site_type {
                         Type::Plain => {
-                            domain.value.clone_into(&mut s);
-                            plain_site_set.insert(s);
+                            plain_site_set.insert(domain.value);
                         }
-                        Type::Regex => {
-                            domain.value.clone_into(&mut s);
-                            regex_sites.push(Regex::new(s.as_str())?)
-                        }
+                        Type::Regex => regex_sites.push(Regex::new(&domain.value.as_str())?),
                         _ => {
-                            let domain: Name<'a> = parse_domain_name(domain.value.as_str())?;
-                            if let Some(domain) = domain.root() {
-                                domain.clone_into(&mut s);
-                                domain_set.insert(s);
-                            }
+                            let domain = parse_domain_name(domain.value.as_str());
+                            let domain_root = match domain {
+                                Ok(root_domain) => match root_domain.root() {
+                                    Some(domain) => domain,
+                                    None => "",
+                                },
+                                Err(_) => "",
+                            };
+                            domain_set.insert(domain_root.to_string());
                         }
                     }
                 }
@@ -150,18 +150,15 @@ impl<'a> MatchProxy {
             }
         }
 
-        Ok(())
-    }
-
-    fn clean_static_data(&mut self) {
-        for s in &self.plain_site_set {
-            let _ = std::mem::drop(s);
-        }
-        self.plain_site_set.clear();
-        for s in &self.domain_set {
-            let _ = std::mem::drop(s);
-        }
-        self.domain_set.clear();
+        // Ok(())
+        let ins = Self {
+            plain_site_set,
+            domain_set,
+            regex_sites,
+            ipv4_combainer: ipv4_combiner,
+            ipv6_combainer: ipv6_combiner,
+        };
+        Ok(ins)
     }
 
     fn regex_match_cn(&self, input_site: &str) -> bool {
@@ -179,8 +176,8 @@ impl<'a> MatchProxy {
             parse_domain_name(input_site);
         let res = match domain {
             Ok(name) => {
-                let res = if let Some(_) = name.root() {
-                    true
+                let res = if let Some(domain_root) = name.root() {
+                    self.domain_set.contains(domain_root)
                 } else {
                     false
                 };
@@ -235,14 +232,18 @@ mod tests {
 
     #[test]
     fn it_works() -> Result<()> {
-        // read_geoip_dat();
-        // read_geo_site_dat();
+        let geoip_file = "/home/hezhaozhao/opensource/kitty/src-tauri/binaries/geoip.dat";
+        let geosite_file = "/home/hezhaozhao/opensource/kitty/src-tauri/binaries/geosite.dat";
+        let ins = MatchProxy::from_geo_dat(
+            Some(&PathBuf::from_str(geoip_file).unwrap()),
+            Some(&PathBuf::from_str(geosite_file).unwrap()),
+        )
+        .unwrap();
+        let res = ins.match_cn_domain("www.baidu.com");
+        assert_eq!(res, true);
 
-        use addr::{parse_dns_name, parse_domain_name};
-
-        let domain = parse_domain_name("www.baidu.com")?;
-        println!("root: {:?}", domain.root());
-
+        let res = ins.match_cn_domain("openai.com");
+        assert_eq!(res, false);
         Ok(())
     }
 }
