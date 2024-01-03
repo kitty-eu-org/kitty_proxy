@@ -1,7 +1,4 @@
 #![forbid(unsafe_code)]
-// #[macro_use]
-// extern crate serde_derive;
-
 use log::{debug, error, info, trace, warn};
 
 use std::io;
@@ -16,8 +13,8 @@ use tokio::signal::unix::{signal, SignalKind};
 use tokio::signal::windows::ctrl_c;
 use tokio::time::timeout;
 
-use crate::MatchProxy;
 use crate::types::{KittyProxyError, ResponseCode};
+use crate::MatchProxy;
 
 pub struct HttpReply {
     buf: Vec<u8>,
@@ -205,14 +202,17 @@ where
         } else {
             Duration::from_millis(500)
         };
+        trace!("req.target_server: {}", req.target_server);
         let match_res = match_proxy.match_cn_domain(req.target_server.as_str());
         let mut target_stream = if match_res {
+            trace!("direct connect");
             timeout(time_out, async move {
                 TcpStream::connect(req.target_server).await
             })
             .await
             .map_err(|_| KittyProxyError::Proxy(ResponseCode::ConnectionRefused))??
         } else {
+            trace!("proxy connect");
             timeout(time_out, async move {
                 TcpStream::connect(format!("{vpn_host}:{vpn_port}")).await
             })
