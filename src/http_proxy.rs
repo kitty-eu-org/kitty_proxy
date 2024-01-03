@@ -254,6 +254,7 @@ impl HttpReq {
         let mut reader = BufReader::new(stream);
         let mut request_first_line = String::new();
         let _ = reader.read_line(&mut request_first_line).await?;
+        trace!("request_first_line: {request_first_line}");
         let mut parts = request_first_line.split_whitespace();
         let method = parts.next().expect("Invalid request");
         let path = parts.next().expect("Invalid request");
