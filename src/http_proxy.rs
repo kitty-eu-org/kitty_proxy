@@ -255,9 +255,10 @@ impl HttpReq {
         let mut request_first_line = String::new();
         let _ = reader.read_line(&mut request_first_line).await?;
         let mut parts = request_first_line.split_whitespace();
-        let _method = parts.next().expect("Invalid request");
+        let method = parts.next().expect("Invalid request");
         let path = parts.next().expect("Invalid request");
-        let _version = parts.next().expect("Invalid request");
+        let version = parts.next().expect("Invalid request");
+        trace!("http req path:{path}, method:{method}, version:{version}");
         Ok(HttpReq {
             target_server: path.to_string(),
             readed_buffer: (request_first_line.clone() + "\n").as_bytes().to_vec(),
