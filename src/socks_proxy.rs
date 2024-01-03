@@ -7,12 +7,14 @@ use log::{debug, error, info, trace, warn};
 use std::io;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{lookup_host, TcpListener, TcpStream};
 use tokio::time::timeout;
 
 use crate::types::{KittyProxyError, ResponseCode};
+use crate::MatchProxy;
 #[cfg(unix)]
 use tokio::signal::unix::{signal, SignalKind};
 #[cfg(windows)]
@@ -158,26 +160,42 @@ pub struct SocksProxy {
     // Timeout for connections
     timeout: Option<Duration>,
     shutdown_flag: AtomicBool,
+    vpn_host: String,
+    vpn_port: u16,
 }
 
 impl SocksProxy {
     /// Create a new Merino instance
-    pub async fn new(port: u16, ip: &str, timeout: Option<Duration>) -> io::Result<Self> {
+    pub async fn new(
+        port: u16,
+        ip: &str,
+        timeout: Option<Duration>,
+        vpn_host: &str,
+        vpn_port: u16,
+    ) -> io::Result<Self> {
         info!("Listening on {}:{}", ip, port);
         Ok(Self {
             listener: TcpListener::bind((ip, port)).await?,
             timeout,
             shutdown_flag: AtomicBool::new(false),
+            vpn_host: vpn_host.to_string(),
+            vpn_port,
         })
     }
 
-    pub async fn serve(&mut self) {
+    pub async fn serve(&mut self, match_proxy: Arc<MatchProxy>) {
         info!("Serving Connections...");
         while let Ok((stream, client_addr)) = self.listener.accept().await {
             let timeout = self.timeout.clone();
+            let match_proxy_clone = Arc::clone(&match_proxy);
+            let vpn_host = self.vpn_host.clone();
+            let vpn_port = self.vpn_port.clone();
             tokio::spawn(async move {
                 let mut client = SOCKClient::new(stream, timeout);
-                match client.init().await {
+                match client
+                    .init(match_proxy_clone, vpn_host.as_str(), vpn_port)
+                    .await
+                {
                     Ok(_) => {}
                     Err(error) => {
                         error!("Error! {:?}, client: {:?}", error, client_addr);
@@ -245,17 +263,18 @@ where
         }
     }
 
-    /// Mutable getter for inner stream
-    pub fn stream_mut(&mut self) -> &mut T {
-        &mut self.stream
-    }
     /// Shutdown a client
     pub async fn shutdown(&mut self) -> io::Result<()> {
         self.stream.shutdown().await?;
         Ok(())
     }
 
-    pub async fn init(&mut self) -> Result<(), KittyProxyError> {
+    pub async fn init(
+        &mut self,
+        match_proxy: Arc<MatchProxy>,
+        vpn_host: &str,
+        vpn_port: u16,
+    ) -> Result<(), KittyProxyError> {
         debug!("New connection");
         let mut header = [0u8; 2];
         // Read a byte from the stream and determine the version being requested
@@ -268,7 +287,8 @@ where
         match self.socks_version {
             SOCKS_VERSION => {
                 // Authenticate w/ client
-                self.handle_client().await?;
+                self.handle_client(match_proxy.as_ref(), vpn_host, vpn_port)
+                    .await?;
             }
             _ => {
                 warn!("Init: Unsupported version: SOCKS{}", self.socks_version);
@@ -280,7 +300,12 @@ where
     }
 
     /// Handles a client
-    pub async fn handle_client(&mut self) -> Result<usize, KittyProxyError> {
+    pub async fn handle_client(
+        &mut self,
+        match_proxy: &MatchProxy,
+        vpn_host: &str,
+        vpn_port: u16,
+    ) -> Result<usize, KittyProxyError> {
         debug!("Starting to relay data");
 
         let req = SOCKSReq::from_stream(&mut self.stream).await?;
@@ -297,11 +322,20 @@ where
                     Duration::from_millis(500)
                 };
 
-                let mut target_stream = timeout(time_out, async move {
-                    TcpStream::connect(req.target_server).await
-                })
-                .await
-                .map_err(|_| KittyProxyError::Proxy(ResponseCode::ConnectionRefused))??;
+                let match_res = match_proxy.match_cn_domain(req.target_server.as_str());
+                let mut target_stream = if match_res {
+                    timeout(time_out, async move {
+                        TcpStream::connect(req.target_server).await
+                    })
+                    .await
+                    .map_err(|_| KittyProxyError::Proxy(ResponseCode::ConnectionRefused))??
+                } else {
+                    timeout(time_out, async move {
+                        TcpStream::connect(format!("{vpn_host}:{vpn_port}")).await
+                    })
+                    .await
+                    .map_err(|_| KittyProxyError::Proxy(ResponseCode::ConnectionRefused))??
+                };
 
                 trace!("Connected!");
                 target_stream.write_all(&req.readed_buffer).await?;

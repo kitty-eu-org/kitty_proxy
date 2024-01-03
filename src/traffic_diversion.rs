@@ -1,8 +1,7 @@
 use crate::v2ray_config::domain::Type;
 use crate::v2ray_config::{Cidr, GeoIpList, GeoSiteList};
 
-use addr::domain::Name;
-use addr::{parse_dns_name, parse_domain_name};
+use addr::parse_domain_name;
 use anyhow::Result;
 use cidr::{Ipv4Cidr, Ipv6Cidr};
 use cidr_utils::combiner::{Ipv4CidrCombiner, Ipv6CidrCombiner};
@@ -58,7 +57,7 @@ impl SiteIp {
     }
 }
 
-struct MatchProxy {
+pub struct MatchProxy {
     plain_site_set: HashSet<String>,
     domain_set: HashSet<String>,
     regex_sites: Vec<Regex>,
@@ -188,7 +187,7 @@ impl MatchProxy {
         res
     }
 
-    fn match_cn_domain(&self, input_site: &str) -> bool {
+    pub fn match_cn_domain(&self, input_site: &str) -> bool {
         if self.plain_site_set.contains(input_site) {
             return true;
         } else {
