@@ -170,7 +170,8 @@ where
         let mut header = [0u8; 2];
         // Read a byte from the stream and determine the version being requested
         self.stream.read_exact(&mut header).await?;
-
+        let header = String::from_utf8(header.to_vec()).unwrap();
+        trace!("header: {header}");
         trace!("Version: {}", self.http_version,);
 
         match self.http_version.as_str() {
