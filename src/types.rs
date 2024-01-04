@@ -5,6 +5,7 @@
 use log::error;
 
 use snafu::Snafu;
+use url::ParseError;
 
 use std::io;
 use thiserror::Error;
@@ -16,6 +17,9 @@ pub enum KittyProxyError {
 
     #[error("Proxy error: {0}")]
     Proxy(#[from] ResponseCode),
+
+    #[error("Proxy error: {0}")]
+    ParseError(#[from] ParseError),
 }
 
 #[derive(Debug, Snafu)]
@@ -47,6 +51,7 @@ impl From<KittyProxyError> for ResponseCode {
         match e {
             KittyProxyError::Proxy(e) => e,
             KittyProxyError::Io(_) => ResponseCode::Failure,
+            KittyProxyError::ParseError(_) => ResponseCode::Failure,
         }
     }
 }

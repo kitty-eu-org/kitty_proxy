@@ -5,13 +5,14 @@ use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 #[cfg(unix)]
 use tokio::signal::unix::{signal, SignalKind};
 #[cfg(windows)]
 use tokio::signal::windows::ctrl_c;
 use tokio::time::timeout;
+use url::Host;
 use url::Url;
 
 use crate::types::{KittyProxyError, ResponseCode};
@@ -200,7 +201,7 @@ where
             Duration::from_millis(500)
         };
         trace!("req.target_server: {}", req.target_server);
-        let match_res = match_proxy.match_cn_domain(req.target_server.as_str());
+        let match_res = match_proxy.traffic_stream(req.host);
         let mut target_stream = if match_res {
             trace!("direct connect");
             let mut target_stream = timeout(time_out, async move {
@@ -238,6 +239,8 @@ where
 /// Proxy User Request
 #[allow(dead_code)]
 struct HttpReq {
+    pub method: String,
+    pub host: Option<Host>,
     pub target_server: String,
     pub readed_buffer: Vec<u8>,
 }
@@ -254,18 +257,21 @@ impl HttpReq {
         trace!("request_first_line: {request_first_line}");
         let mut parts = request_first_line.split_whitespace();
         let method = parts.next().expect("Invalid request");
-        let path = parts.next().expect("Invalid request");
+        let origin_path = parts.next().expect("Invalid request");
         let version = parts.next().expect("Invalid request");
-        trace!("http req path:{path}, method:{method}, version:{version}");
-        let path = if method.to_lowercase() == "connect" {
-            path.split(":").next().expect("request path error")
-        } else {
-            let aa = Url::parse(path)?;
-            ""
+        trace!("http req path:{origin_path}, method:{method}, version:{version}");
 
+        let mut origin_path = origin_path.to_string();
+        if method.to_lowercase() == "connect" {
+            origin_path.insert_str(0, "https://")
         };
+        let url = Url::parse(&origin_path)?;
+        let host = url.host().map(|x| x.to_owned());
+
         Ok(HttpReq {
-            target_server: path.to_string(),
+            method: method.to_string(),
+            host,
+            target_server: origin_path.to_string(),
             readed_buffer: (request_first_line.clone() + "\n").as_bytes().to_vec(),
         })
     }

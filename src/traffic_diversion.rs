@@ -13,6 +13,7 @@ use std::io::Read;
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::path::PathBuf;
 use std::str::FromStr;
+use url::Host;
 
 use std::fmt;
 
@@ -206,6 +207,15 @@ impl MatchProxy {
             SiteIp::Ipv6Site(site) => self.ipv6_combainer.contains(&site),
             SiteIp::DomainSite(site) => self.match_cn_domain(&site),
             _ => false,
+        }
+    }
+
+    pub fn traffic_stream(&self, host: Option<Host>) -> bool {
+        match host {
+            Some(Host::Ipv4(host)) => self.ipv4_combainer.contains(&host),
+            Some(Host::Ipv6(host)) => self.ipv6_combainer.contains(&host),
+            Some(Host::Domain(host)) => self.match_cn_domain(&host),
+            None => false,
         }
     }
 
