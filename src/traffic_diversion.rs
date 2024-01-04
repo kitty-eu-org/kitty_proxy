@@ -133,7 +133,7 @@ impl MatchProxy {
                             plain_site_set.insert(domain.value);
                         }
                         Type::Regex => regex_sites.push(Regex::new(&domain.value.as_str())?),
-                        _ => {
+                        Type::Domain => {
                             let domain = parse_domain_name(domain.value.as_str());
                             let domain_root = match domain {
                                 Ok(root_domain) => match root_domain.root() {
@@ -143,6 +143,9 @@ impl MatchProxy {
                                 Err(_) => "",
                             };
                             domain_set.insert(domain_root.to_string());
+                        }
+                        Type::Full => {
+                            plain_site_set.insert(domain.value);
                         }
                     }
                 }
@@ -236,6 +239,7 @@ impl MatchProxy {
 #[cfg(test)]
 mod tests {
     use anyhow::Ok;
+    use url::Url;
 
     use super::*;
 
@@ -253,6 +257,12 @@ mod tests {
 
         let res = ins.match_cn_domain("openai.com");
         assert_eq!(res, false);
+        let host = Url::parse("http://www.google.com")?
+            .host()
+            .map(|x| x.to_owned());
+        println!("host: {:?}", host);
+        let res3 = ins.traffic_stream(host);
+        assert_eq!(res3, false);
         Ok(())
     }
 }
