@@ -269,6 +269,7 @@ impl HttpReq {
         let host = url.host().map(|x| x.to_owned());
         let port = url.port().unwrap_or(80);
         let host_str = host.clone().expect("request host is invalid").to_string();
+        trace!("host: {:?}", host);
         Ok(HttpReq {
             method: method.to_string(),
             host,
