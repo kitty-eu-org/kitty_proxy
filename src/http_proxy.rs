@@ -12,6 +12,7 @@ use tokio::signal::unix::{signal, SignalKind};
 #[cfg(windows)]
 use tokio::signal::windows::ctrl_c;
 use tokio::time::timeout;
+use url::Url;
 
 use crate::types::{KittyProxyError, ResponseCode};
 use crate::MatchProxy;
@@ -256,6 +257,13 @@ impl HttpReq {
         let path = parts.next().expect("Invalid request");
         let version = parts.next().expect("Invalid request");
         trace!("http req path:{path}, method:{method}, version:{version}");
+        let path = if method.to_lowercase() == "connect" {
+            path.split(":").next().expect("request path error")
+        } else {
+            let aa = Url::parse(path)?;
+            ""
+
+        };
         Ok(HttpReq {
             target_server: path.to_string(),
             readed_buffer: (request_first_line.clone() + "\n").as_bytes().to_vec(),
