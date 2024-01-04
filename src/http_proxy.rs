@@ -209,7 +209,7 @@ where
             })
             .await
             .map_err(|_| KittyProxyError::Proxy(ResponseCode::ConnectionRefused))??;
-            target_stream.write_all(&req.readed_buffer).await?;
+            // target_stream.write_all(&req.readed_buffer).await?;
             target_stream
         } else {
             trace!("proxy connect");
