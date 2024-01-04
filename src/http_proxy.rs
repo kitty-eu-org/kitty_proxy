@@ -267,11 +267,12 @@ impl HttpReq {
         };
         let url = Url::parse(&origin_path)?;
         let host = url.host().map(|x| x.to_owned());
-
+        let port = url.port().unwrap_or(80);
+        let host_str = host.clone().expect("request host is invalid").to_string();
         Ok(HttpReq {
             method: method.to_string(),
             host,
-            target_server: origin_path.to_string(),
+            target_server: format!("{host_str}:{port}"),
             readed_buffer: (request_first_line.clone() + "\n").as_bytes().to_vec(),
         })
     }
