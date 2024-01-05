@@ -202,26 +202,24 @@ where
         };
         trace!("req.target_server: {}", req.target_server);
         let match_res = match_proxy.traffic_stream(req.host);
-        let mut target_stream = if match_res {
+        let target_server = if match_res {
             trace!("direct connect");
-            let mut target_stream = timeout(time_out, async move {
-                TcpStream::connect(req.target_server).await
-            })
-            .await
-            .map_err(|_| KittyProxyError::Proxy(ResponseCode::ConnectionRefused))??;
-            // target_stream.write_all(&req.readed_buffer).await?;
-            target_stream
+            req.target_server
         } else {
             trace!("proxy connect");
-            let target_stream = timeout(time_out, async move {
-                TcpStream::connect(format!("{vpn_host}:{vpn_port}")).await
-            })
+            format!("{vpn_host}:{vpn_port}")
+        };
+        let mut target_stream =
+            timeout(
+                time_out,
+                async move { TcpStream::connect(target_server).await },
+            )
             .await
             .map_err(|_| KittyProxyError::Proxy(ResponseCode::ConnectionRefused))??;
-            // target_stream.write_all(&req.readed_buffer).await?;
-            target_stream
-        };
-
+        if req.method == "CONNECT" {
+            self.stream
+                .write_all("HTTP/1.1 200 Connection established\r\n\r\n".as_bytes()).await?;
+        }
         trace!("copy bidirectional");
         target_stream.write_all(&req.readed_buffer).await?;
         match tokio::io::copy_bidirectional(&mut self.stream, &mut target_stream).await {
