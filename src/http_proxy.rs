@@ -218,7 +218,8 @@ where
             .map_err(|_| KittyProxyError::Proxy(ResponseCode::ConnectionRefused))??;
         if req.method == "CONNECT" {
             self.stream
-                .write_all("HTTP/1.1 200 Connection established\r\n\r\n".as_bytes()).await?;
+                .write_all("HTTP/1.1 200 Connection established\r\n\r\n".as_bytes())
+                .await?;
         }
         trace!("copy bidirectional");
         // target_stream.write_all(&req.readed_buffer).await?;
@@ -249,10 +250,18 @@ impl HttpReq {
     where
         T: AsyncRead + AsyncWrite + Send + Unpin + 'static,
     {
+        let mut request_heade:Vec<String> = Vec::new();
         let mut reader = BufReader::new(stream);
-        let mut request_first_line = String::new();
-        let _ = reader.read_line(&mut request_first_line).await?;
-        trace!("request_first_line: {request_first_line}");
+        let request_headers = Vec::new();
+        loop {
+            let mut tmp = String::new();
+            reader.read_line(&mut tmp);
+            request_headers.push(tmp.clone());
+            if tmp == "\r\n\r\n" {
+                break;
+            }
+        }
+        let request_first_line = request_headers[0];
         let mut parts = request_first_line.split_whitespace();
         let method = parts.next().expect("Invalid request");
         let origin_path = parts.next().expect("Invalid request");
