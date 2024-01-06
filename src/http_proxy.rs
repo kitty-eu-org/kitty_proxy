@@ -5,7 +5,7 @@ use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader, AsyncReadExt};
 use tokio::net::{TcpListener, TcpStream};
 #[cfg(unix)]
 use tokio::signal::unix::{signal, SignalKind};
@@ -251,7 +251,7 @@ impl HttpReq {
         T: AsyncRead + AsyncWrite + Send + Unpin + 'static,
     {
         let mut request_headers: Vec<String> = Vec::new();
-        let mut reader = BufReader::new(stream);
+        let mut reader: BufReader<&mut T> = BufReader::new(stream);
 
         trace!("\\r\\n\\r\\n string: {:?}", "\r\n\r\n".as_bytes());
         trace!("\\n\\n string: {:?}", "\n\n".as_bytes());
@@ -260,7 +260,7 @@ impl HttpReq {
             reader.read_line(&mut tmp).await?;
             trace!("tmp string: {tmp}, bytes: {:?}", tmp.as_bytes());
             request_headers.push(tmp.clone());
-            if tmp == "\r\n\r\n" {
+            if tmp == "\r\n" {
                 break;
             }
         }
@@ -284,7 +284,7 @@ impl HttpReq {
             method: method.to_string(),
             host,
             target_server: format!("{host_str}:{port}"),
-            readed_buffer: request_headers.join("\r\n").as_bytes().to_vec(),
+            readed_buffer: request_headers.join("").as_bytes().to_vec(),
         })
     }
 }
