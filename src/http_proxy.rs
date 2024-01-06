@@ -278,8 +278,10 @@ impl HttpReq {
 
         let mut origin_path = origin_path.to_string();
         if method.to_lowercase() == "connect" {
+            trace!("connect: {:?}", method.to_lowercase());
             origin_path.insert_str(0, "https://")
         };
+        trace!("origin_path: {:?}", origin_path);
         let url = Url::parse(&origin_path)?;
         trace!("url: {:?}", url);
         let host = url.host().map(|x| x.to_owned());
