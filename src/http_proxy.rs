@@ -258,12 +258,9 @@ impl HttpReq {
         let mut request_headers: Vec<String> = Vec::new();
         let mut reader: BufReader<&mut T> = BufReader::new(stream);
 
-        trace!("\\r\\n\\r\\n string: {:?}", "\r\n\r\n".as_bytes());
-        trace!("\\n\\n string: {:?}", "\n\n".as_bytes());
         loop {
             let mut tmp = String::new();
             reader.read_line(&mut tmp).await?;
-            trace!("tmp string: {tmp}, bytes: {:?}", tmp.as_bytes());
             request_headers.push(tmp.clone());
             if tmp == "\r\n" {
                 break;
@@ -277,15 +274,11 @@ impl HttpReq {
         trace!("http req path:{origin_path}, method:{method}, version:{version}");
 
         let mut origin_path = origin_path.to_string();
-        if method.to_lowercase() == "connect" {
-            trace!("connect: {:?}", method.to_lowercase());
-            origin_path.insert_str(0, "https://")
+        if method == "CONNECT" {
+            origin_path.insert_str(0, "http://")
         };
-        trace!("origin_path: {:?}", origin_path);
         let url = Url::parse(&origin_path)?;
-        trace!("url: {:?}", url);
         let host = url.host().map(|x| x.to_owned());
-        trace!("url.port: {:?}", url.port());
         let port = url.port().unwrap_or(80);
         let host_str = host.clone().expect("request host is invalid");
         trace!("host: {:?}", host);
