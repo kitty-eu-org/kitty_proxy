@@ -255,6 +255,7 @@ impl HttpReq {
         loop {
             let mut tmp = String::new();
             reader.read_line(&mut tmp).await?;
+            trace!("tmp string: {tmp}");
             request_headers.push(tmp.clone());
             if tmp == "\r\n\r\n" {
                 break;
