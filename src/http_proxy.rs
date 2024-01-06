@@ -210,16 +210,6 @@ where
             format!("{vpn_host}:{vpn_port}")
         };
         
-        
-        if req.method == "CONNECT" {
-            self.stream
-                .write_all("HTTP/1.1 200 Connection established\r\n\r\n".as_bytes())
-                .await?;
-        }
-        // else {
-        //     target_stream.write_all(&req.readed_buffer).await?;
-        // }
-
         let mut target_stream =
         timeout(
             time_out,
@@ -227,6 +217,16 @@ where
         )
         .await
         .map_err(|_| KittyProxyError::Proxy(ResponseCode::ConnectionRefused))??;
+        
+        if req.method == "CONNECT" {
+            self.stream
+                .write_all(b"HTTP/1.1 200 Connection established\r\n\r\n")
+                .await?;
+        }
+        else {
+            target_stream.write_all(&req.readed_buffer).await?;
+        }
+
         trace!("copy bidirectional");
         match tokio::io::copy_bidirectional(&mut self.stream, &mut target_stream).await {
             // ignore not connected for shutdown error
@@ -281,6 +281,7 @@ impl HttpReq {
             origin_path.insert_str(0, "https://")
         };
         let url = Url::parse(&origin_path)?;
+        trace!("url: {:?}", url);
         let host = url.host().map(|x| x.to_owned());
         let port = url.port().unwrap_or(80);
         let host_str = host.clone().expect("request host is invalid");
