@@ -2,7 +2,7 @@
 // #[macro_use]
 // extern crate serde_derive;
 
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use log::{debug, error, info, trace, warn};
 
 use std::io;
@@ -383,9 +383,8 @@ impl SOCKSReq {
 
         if socks_version != SOCKS_VERSION {
             warn!("Init: Unsupported version: SOCKS{}", socks_version);
-            // let res = self.shutdown().await;
-            // return Ok(0);
-            panic!("aaa");
+            stream.shutdown().await?;
+            return Err(anyhow!(format!("Not support version: {}.", socks_version)).into());
         }
         let mut method = vec![0u8; auth_method];
         stream.read_exact(&mut method).await?;

@@ -20,6 +20,9 @@ pub enum KittyProxyError {
 
     #[error("Proxy error: {0}")]
     ParseError(#[from] ParseError),
+
+    #[error("error: {0}")]
+    Error(#[from] anyhow::Error),
 }
 
 #[derive(Debug, Snafu)]
@@ -52,6 +55,7 @@ impl From<KittyProxyError> for ResponseCode {
             KittyProxyError::Proxy(e) => e,
             KittyProxyError::Io(_) => ResponseCode::Failure,
             KittyProxyError::ParseError(_) => ResponseCode::Failure,
+            KittyProxyError::Error(_) => ResponseCode::Failure,
         }
     }
 }

@@ -1,11 +1,12 @@
 #![forbid(unsafe_code)]
 use log::{debug, error, info, trace, warn};
 
+use anyhow::anyhow;
 use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 #[cfg(unix)]
 use tokio::signal::unix::{signal, SignalKind};
@@ -166,10 +167,6 @@ where
     ) -> Result<usize, KittyProxyError> {
         debug!("Starting to relay data");
         let req: HttpReq = HttpReq::from_stream(&mut self.stream).await?;
-        if req.version != "HTTP/1.1" {
-            warn!("Init: Unsupported version: HTTP{}", req.version);
-            self.shutdown().await?;
-        }
         let time_out = if let Some(time_out) = self.timeout {
             time_out
         } else {
@@ -219,7 +216,6 @@ where
 struct HttpReq {
     pub method: String,
     pub host: Option<Host>,
-    pub version: String,
     pub target_server: String,
     pub readed_buffer: Vec<u8>,
 }
@@ -248,6 +244,12 @@ impl HttpReq {
         let version = parts.next().expect("Invalid request");
         trace!("http req path:{origin_path}, method:{method}, version:{version}");
 
+        if version != "HTTP/1.1" {
+            warn!("Init: Unsupported version: HTTP{}", version);
+            stream.shutdown().await?;
+            return Err(anyhow!(format!("Not support version: {}.", version)).into());
+        }
+
         let mut origin_path = origin_path.to_string();
         if method == "CONNECT" {
             origin_path.insert_str(0, "http://")
@@ -259,7 +261,6 @@ impl HttpReq {
         trace!("host: {:?}", host);
         Ok(HttpReq {
             method: method.to_string(),
-            version: version.to_string(),
             host,
             target_server: format!("{host_str}:{port}"),
             readed_buffer: request_headers.join("").as_bytes().to_vec(),
