@@ -216,15 +216,12 @@ where
             )
             .await
             .map_err(|_| KittyProxyError::Proxy(ResponseCode::ConnectionRefused))??;
-        // if req.method == "CONNECT" {
-        //     self.stream
-        //         .write_all("HTTP/1.1 200 Connection established\r\n\r\n".as_bytes())
-        //         .await?;
-        // }
-        // else {
-        //     target_stream.write_all(&req.readed_buffer).await?;
-        // }
-        if req.method != "CONNECT" {
+        if req.method == "CONNECT" {
+            self.stream
+                .write_all("HTTP/1.1 200 Connection established\r\n\r\n".as_bytes())
+                .await?;
+        }
+        else {
             target_stream.write_all(&req.readed_buffer).await?;
         }
         trace!("copy bidirectional");
