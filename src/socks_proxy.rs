@@ -2,15 +2,15 @@
 // #[macro_use]
 // extern crate serde_derive;
 
+use anyhow::Result;
 use log::{debug, error, info, trace, warn};
 
 use std::io;
-use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use tokio::net::{lookup_host, TcpListener, TcpStream};
+use tokio::net::{TcpListener, TcpStream};
 use tokio::time::timeout;
 
 use crate::types::{KittyProxyError, ResponseCode};
@@ -193,7 +193,7 @@ impl SocksProxy {
             tokio::spawn(async move {
                 let mut client = SOCKClient::new(stream, timeout);
                 match client
-                    .init(match_proxy_clone, vpn_host.as_str(), vpn_port)
+                    .handle_client(match_proxy_clone.as_ref(), vpn_host.as_str(), vpn_port)
                     .await
                 {
                     Ok(_) => {}
@@ -264,38 +264,8 @@ where
     }
 
     /// Shutdown a client
-    pub async fn shutdown(&mut self) -> io::Result<()> {
+    pub async fn shutdown(&mut self) -> Result<(), KittyProxyError> {
         self.stream.shutdown().await?;
-        Ok(())
-    }
-
-    pub async fn init(
-        &mut self,
-        match_proxy: Arc<MatchProxy>,
-        vpn_host: &str,
-        vpn_port: u16,
-    ) -> Result<(), KittyProxyError> {
-        debug!("New connection");
-        let mut header = [0u8; 2];
-        // Read a byte from the stream and determine the version being requested
-        self.stream.read_exact(&mut header).await?;
-
-        self.socks_version = header[0];
-
-        trace!("Version: {}", self.socks_version,);
-
-        match self.socks_version {
-            SOCKS_VERSION => {
-                // Authenticate w/ client
-                self.handle_client(match_proxy.as_ref(), vpn_host, vpn_port)
-                    .await?;
-            }
-            _ => {
-                warn!("Init: Unsupported version: SOCKS{}", self.socks_version);
-                self.shutdown().await?;
-            }
-        }
-
         Ok(())
     }
 
@@ -306,7 +276,6 @@ where
         vpn_host: &str,
         vpn_port: u16,
     ) -> Result<usize, KittyProxyError> {
-        debug!("Starting to relay data");
 
         let req = SOCKSReq::from_stream(&mut self.stream).await?;
 
@@ -402,6 +371,25 @@ impl SOCKSReq {
         //      o  DST.ADDR       desired destination address
         //      o  DST.PORT desired destination port in network octet
         //         order
+        debug!("New connection");
+        let mut header = [0u8; 2];
+        // Read a byte from the stream and determine the version being requested
+        stream.read_exact(&mut header).await?;
+
+        let socks_version = header[0];
+        let auth_method = header[1] as usize;
+
+        trace!("Version: {}", socks_version);
+
+        if socks_version != SOCKS_VERSION {
+            warn!("Init: Unsupported version: SOCKS{}", socks_version);
+            // let res = self.shutdown().await;
+            // return Ok(0);
+            panic!("aaa");
+        }
+        let mut method = vec![0u8; auth_method];
+        stream.read_exact(&mut method).await?;
+
         trace!("Server waiting for connect");
         let mut merged_data: Vec<u8> = Vec::new();
 

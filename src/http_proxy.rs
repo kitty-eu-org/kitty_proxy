@@ -86,7 +86,7 @@ impl HttpProxy {
             tokio::spawn(async move {
                 let mut client = HttpClient::new(stream, timeout);
                 match client
-                    .init(match_proxy_clone, vpn_host.as_str(), vpn_port)
+                    .handle_client(match_proxy_clone.as_ref(), vpn_host.as_str(), vpn_port)
                     .await
                 {
                     Ok(_) => {}
@@ -139,7 +139,6 @@ impl HttpProxy {
 
 pub struct HttpClient<T: AsyncRead + AsyncWrite + Send + Unpin + 'static> {
     stream: T,
-    http_version: String,
     timeout: Option<Duration>,
 }
 
@@ -149,40 +148,12 @@ where
 {
     /// Create a new SOCKClient
     pub fn new(stream: T, timeout: Option<Duration>) -> Self {
-        Self {
-            stream,
-            http_version: String::from("HTTP/1.1"),
-            timeout,
-        }
+        Self { stream, timeout }
     }
 
     /// Shutdown a client
     pub async fn shutdown(&mut self) -> io::Result<()> {
         self.stream.shutdown().await?;
-        Ok(())
-    }
-
-    pub async fn init(
-        &mut self,
-        match_proxy: Arc<MatchProxy>,
-        vpn_host: &str,
-        vpn_port: u16,
-    ) -> Result<(), KittyProxyError> {
-        debug!("New connection");
-        trace!("Version: {}", self.http_version,);
-
-        match self.http_version.as_str() {
-            "HTTP/1.1" => {
-                // Authenticate w/ client
-                self.handle_client(match_proxy.as_ref(), vpn_host, vpn_port)
-                    .await?;
-            }
-            _ => {
-                warn!("Init: Unsupported version: HTTP{}", self.http_version);
-                self.shutdown().await?;
-            }
-        }
-
         Ok(())
     }
 
@@ -194,7 +165,11 @@ where
         vpn_port: u16,
     ) -> Result<usize, KittyProxyError> {
         debug!("Starting to relay data");
-        let req = HttpReq::from_stream(&mut self.stream).await?;
+        let req: HttpReq = HttpReq::from_stream(&mut self.stream).await?;
+        if req.version != "HTTP/1.1" {
+            warn!("Init: Unsupported version: HTTP{}", req.version);
+            self.shutdown().await?;
+        }
         let time_out = if let Some(time_out) = self.timeout {
             time_out
         } else {
@@ -244,6 +219,7 @@ where
 struct HttpReq {
     pub method: String,
     pub host: Option<Host>,
+    pub version: String,
     pub target_server: String,
     pub readed_buffer: Vec<u8>,
 }
@@ -283,6 +259,7 @@ impl HttpReq {
         trace!("host: {:?}", host);
         Ok(HttpReq {
             method: method.to_string(),
+            version: version.to_string(),
             host,
             target_server: format!("{host_str}:{port}"),
             readed_buffer: request_headers.join("").as_bytes().to_vec(),
