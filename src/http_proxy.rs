@@ -218,10 +218,10 @@ where
         .await
         .map_err(|_| KittyProxyError::Proxy(ResponseCode::ConnectionRefused))??;
         
-        if req.method == "CONNECT" {
+        if req.method == "CONNECT" && match_res {
             self.stream
-                .write_all(b"HTTP/1.1 200 Connection established\r\n\r\n")
-                .await?;
+            .write_all(b"HTTP/1.1 200 Connection established\r\n\r\n")
+            .await?;
         }
         else {
             target_stream.write_all(&req.readed_buffer).await?;
