@@ -210,22 +210,23 @@ where
             format!("{vpn_host}:{vpn_port}")
         };
         
+        
         if req.method == "CONNECT" {
             self.stream
                 .write_all("HTTP/1.1 200 Connection established\r\n\r\n".as_bytes())
                 .await?;
         }
-        let mut target_stream =
-            timeout(
-                time_out,
-                async move { TcpStream::connect(target_server).await },
-            )
-            .await
-            .map_err(|_| KittyProxyError::Proxy(ResponseCode::ConnectionRefused))??;
-        target_stream.write_all(&req.readed_buffer).await?;
         // else {
-            
+        //     target_stream.write_all(&req.readed_buffer).await?;
         // }
+
+        let mut target_stream =
+        timeout(
+            time_out,
+            async move { TcpStream::connect(target_server).await },
+        )
+        .await
+        .map_err(|_| KittyProxyError::Proxy(ResponseCode::ConnectionRefused))??;
         trace!("copy bidirectional");
         match tokio::io::copy_bidirectional(&mut self.stream, &mut target_stream).await {
             // ignore not connected for shutdown error
