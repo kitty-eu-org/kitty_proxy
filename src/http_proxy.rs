@@ -5,7 +5,7 @@ use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader, AsyncReadExt};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 #[cfg(unix)]
 use tokio::signal::unix::{signal, SignalKind};
@@ -209,21 +209,20 @@ where
             trace!("proxy connect");
             format!("{vpn_host}:{vpn_port}")
         };
-        
+
         let mut target_stream =
-        timeout(
-            time_out,
-            async move { TcpStream::connect(target_server).await },
-        )
-        .await
-        .map_err(|_| KittyProxyError::Proxy(ResponseCode::ConnectionRefused))??;
-        
+            timeout(
+                time_out,
+                async move { TcpStream::connect(target_server).await },
+            )
+            .await
+            .map_err(|_| KittyProxyError::Proxy(ResponseCode::ConnectionRefused))??;
+
         if req.method == "CONNECT" && match_res {
             self.stream
-            .write_all(b"HTTP/1.1 200 Connection established\r\n\r\n")
-            .await?;
-        }
-        else {
+                .write_all(b"HTTP/1.1 200 Connection established\r\n\r\n")
+                .await?;
+        } else {
             target_stream.write_all(&req.readed_buffer).await?;
         }
 

@@ -167,8 +167,8 @@ pub struct SocksProxy {
 impl SocksProxy {
     /// Create a new Merino instance
     pub async fn new(
-        port: u16,
         ip: &str,
+        port: u16,
         timeout: Option<Duration>,
         vpn_host: &str,
         vpn_port: u16,
