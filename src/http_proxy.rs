@@ -250,18 +250,17 @@ impl HttpReq {
     where
         T: AsyncRead + AsyncWrite + Send + Unpin + 'static,
     {
-        let mut request_heade:Vec<String> = Vec::new();
+        let mut request_headers: Vec<String> = Vec::new();
         let mut reader = BufReader::new(stream);
-        let request_headers = Vec::new();
         loop {
             let mut tmp = String::new();
-            reader.read_line(&mut tmp);
+            reader.read_line(&mut tmp).await?;
             request_headers.push(tmp.clone());
             if tmp == "\r\n\r\n" {
                 break;
             }
         }
-        let request_first_line = request_headers[0];
+        let request_first_line = request_headers.get(0).unwrap().clone();
         let mut parts = request_first_line.split_whitespace();
         let method = parts.next().expect("Invalid request");
         let origin_path = parts.next().expect("Invalid request");
@@ -281,7 +280,7 @@ impl HttpReq {
             method: method.to_string(),
             host,
             target_server: format!("{host_str}:{port}"),
-            readed_buffer: (request_first_line.clone() + "\n").as_bytes().to_vec(),
+            readed_buffer: request_headers.join("\r\n").as_bytes().to_vec(),
         })
     }
 }
