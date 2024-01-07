@@ -2,7 +2,7 @@
 // #[macro_use]
 // extern crate serde_derive;
 
-use anyhow::{Result, anyhow};
+use anyhow::{anyhow, Result};
 use log::{debug, error, info, trace, warn};
 
 use std::io;
@@ -276,7 +276,6 @@ where
         vpn_host: &str,
         vpn_port: u16,
     ) -> Result<usize, KittyProxyError> {
-
         let req = SOCKSReq::from_stream(&mut self.stream).await?;
 
         // Respond
@@ -331,6 +330,13 @@ where
             ))),
         }
     }
+}
+
+pub enum AuthMethod {
+    /// No Authentication
+    NoAuth = 0x00,
+    /// Cannot authenticate
+    NoMethod = 0xFF,
 }
 
 /// Proxy User Request
@@ -388,6 +394,21 @@ impl SOCKSReq {
         }
         let mut method = vec![0u8; auth_method];
         stream.read_exact(&mut method).await?;
+
+        let no_auth = AuthMethod::NoAuth as u8;
+        trace!("0x00 as u8: {no_auth}");
+
+        let mut auth_response = [0u8, 2];
+        auth_response[0] = SOCKS_VERSION;
+        if method.contains(&no_auth) {
+            auth_response[1] = no_auth;
+            stream.write_all(&auth_response).await?;
+        } else {
+            auth_response[1] = AuthMethod::NoMethod as u8;
+            stream.write_all(&auth_response).await?;
+            stream.shutdown().await?;
+            return Err(anyhow!("Socks auth failed.").into());
+        }
 
         trace!("Server waiting for connect");
         let mut merged_data: Vec<u8> = Vec::new();
