@@ -4,8 +4,11 @@
 
 use anyhow::{anyhow, Result};
 use log::{debug, error, info, trace, warn};
+use url::Host;
 
 use std::io;
+use std::net::ToSocketAddrs;
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -144,17 +147,6 @@ impl SockCommand {
     }
 }
 
-/// Client Authentication Methods
-pub enum AuthMethods {
-    /// No Authentication
-    NoAuth = 0x00,
-    // GssApi = 0x01,
-    /// Authenticate with a username / password
-    UserPass = 0x02,
-    /// Cannot authenticate
-    NoMethods = 0xFF,
-}
-
 pub struct SocksProxy {
     listener: TcpListener,
     // Timeout for connections
@@ -246,7 +238,6 @@ impl SocksProxy {
 
 pub struct SOCKClient<T: AsyncRead + AsyncWrite + Send + Unpin + 'static> {
     stream: T,
-    socks_version: u8,
     timeout: Option<Duration>,
 }
 
@@ -256,11 +247,7 @@ where
 {
     /// Create a new SOCKClient
     pub fn new(stream: T, timeout: Option<Duration>) -> Self {
-        SOCKClient {
-            stream,
-            socks_version: 0,
-            timeout,
-        }
+        SOCKClient { stream, timeout }
     }
 
     /// Shutdown a client
@@ -289,13 +276,23 @@ where
                 } else {
                     Duration::from_millis(500)
                 };
-                trace!("req.target_server: {}", req.target_server);
-                let match_res = match_proxy.match_cn_domain(req.target_server.as_str());
+
+                let match_res = match_proxy.traffic_stream(&req.host);
+                let target_server = if match_res {
+                    trace!("direct connect");
+                    format!("{}:{}", req.host, req.port)
+                } else {
+                    trace!("proxy connect");
+                    format!("{vpn_host}:{vpn_port}")
+                };
+                trace!("req.target_server: {}", target_server);
+
                 let mut target_stream = if match_res {
                     trace!("direct connect");
-                    timeout(time_out, async move {
-                        TcpStream::connect(req.target_server).await
-                    })
+                    timeout(
+                        time_out,
+                        async move { TcpStream::connect(target_server).await },
+                    )
                     .await
                     .map_err(|_| KittyProxyError::Proxy(ResponseCode::ConnectionRefused))??
                 } else {
@@ -339,12 +336,44 @@ pub enum AuthMethod {
     NoMethod = 0xFF,
 }
 
+async fn addr_to_host(addr_type: &AddrType, addr: &[u8]) -> io::Result<Host> {
+    match addr_type {
+        AddrType::V6 => {
+            let new_addr = (0..8)
+                .map(|x| {
+                    trace!("{} and {}", x * 2, (x * 2) + 1);
+                    (u16::from(addr[(x * 2)]) << 8) | u16::from(addr[(x * 2) + 1])
+                })
+                .collect::<Vec<u16>>();
+
+            Ok(Host::Ipv6(Ipv6Addr::new(
+                new_addr[0],
+                new_addr[1],
+                new_addr[2],
+                new_addr[3],
+                new_addr[4],
+                new_addr[5],
+                new_addr[6],
+                new_addr[7],
+            )))
+        }
+        AddrType::V4 => Ok(Host::Ipv4(Ipv4Addr::new(
+            addr[0], addr[1], addr[2], addr[3],
+        ))),
+        AddrType::Domain => {
+            let domain = std::str::from_utf8(addr).expect("parse domain failed from u8!");
+            Ok(Host::Domain(domain.to_string()))
+        }
+    }
+}
+
 /// Proxy User Request
 #[allow(dead_code)]
 struct SOCKSReq {
     pub version: u8,
     pub command: SockCommand,
-    pub target_server: String,
+    pub host: Host,
+    pub port: u16,
     pub readed_buffer: Vec<u8>,
 }
 
@@ -378,9 +407,12 @@ impl SOCKSReq {
         //      o  DST.PORT desired destination port in network octet
         //         order
         debug!("New connection");
+
+        let mut readed_buffer: Vec<u8> = Vec::new();
         let mut header = [0u8; 2];
         // Read a byte from the stream and determine the version being requested
         stream.read_exact(&mut header).await?;
+        readed_buffer.extend_from_slice(&header);
 
         let socks_version = header[0];
         let auth_method = header[1] as usize;
@@ -394,6 +426,7 @@ impl SOCKSReq {
         }
         let mut method = vec![0u8; auth_method];
         stream.read_exact(&mut method).await?;
+        readed_buffer.extend_from_slice(&method);
 
         let no_auth = AuthMethod::NoAuth as u8;
         trace!("0x00 as u8: {no_auth}");
@@ -411,13 +444,12 @@ impl SOCKSReq {
         }
 
         trace!("Server waiting for connect");
-        let mut merged_data: Vec<u8> = Vec::new();
 
         let mut packet = [0u8; 4];
         // Read a byte from the stream and determine the version being requested
         stream.read_exact(&mut packet).await?;
         trace!("Server received {:?}", packet);
-        merged_data.extend_from_slice(&packet);
+        readed_buffer.extend_from_slice(&packet);
 
         if packet[0] != SOCKS_VERSION {
             warn!("from_stream Unsupported version: SOCKS{}", packet[0]);
@@ -434,8 +466,6 @@ impl SOCKSReq {
             }
         }?;
 
-        // DST.address
-
         let addr_type = match AddrType::from(packet[3] as usize) {
             Some(addr) => Ok(addr),
             None => {
@@ -451,38 +481,40 @@ impl SOCKSReq {
             AddrType::Domain => {
                 let mut dlen = [0u8; 1];
                 stream.read_exact(&mut dlen).await?;
-                // merged_data.extend_from_slice(&dlen);
+                readed_buffer.extend_from_slice(&dlen);
                 let mut domain = vec![0u8; dlen[0] as usize];
                 stream.read_exact(&mut domain).await?;
-                // merged_data.extend_from_slice(&domain);
+                readed_buffer.extend_from_slice(&domain);
                 domain
             }
             AddrType::V4 => {
                 let mut addr: [u8; 4] = [0u8; 4];
                 stream.read_exact(&mut addr).await?;
-                // merged_data.extend_from_slice(&addr);
+                readed_buffer.extend_from_slice(&addr);
                 addr.to_vec()
             }
             AddrType::V6 => {
                 let mut addr = [0u8; 16];
                 stream.read_exact(&mut addr).await?;
-                // merged_data.extend_from_slice(&addr);
+                readed_buffer.extend_from_slice(&addr);
                 addr.to_vec()
             }
         };
-        let domain_slice: &[u8] = &addr;
-
-        // 使用 from_utf8 函数将切片转换为字符串
-        let target_server = std::str::from_utf8(domain_slice)
-            .expect("Invalid UTF-8")
-            .to_string();
+        // read DST.port
+        let mut port = [0u8; 2];
+        stream.read_exact(&mut port).await?;
+        readed_buffer.extend_from_slice(&port);
+        let port = (u16::from(port[0]) << 8) | u16::from(port[1]);
+        let host = addr_to_host(&addr_type, &addr).await?;
+        trace!("host: {host}");
 
         // Return parsed request
         Ok(SOCKSReq {
             version: packet[0],
             command,
-            target_server: target_server,
-            readed_buffer: merged_data,
+            host,
+            port,
+            readed_buffer,
         })
     }
 }

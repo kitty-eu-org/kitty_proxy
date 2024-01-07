@@ -213,12 +213,11 @@ impl MatchProxy {
         }
     }
 
-    pub fn traffic_stream(&self, host: Option<Host>) -> bool {
+    pub fn traffic_stream(&self, host: &Host) -> bool {
         match host {
-            Some(Host::Ipv4(host)) => self.ipv4_combainer.contains(&host),
-            Some(Host::Ipv6(host)) => self.ipv6_combainer.contains(&host),
-            Some(Host::Domain(host)) => self.match_cn_domain(&host),
-            None => false,
+            Host::Ipv4(host) => self.ipv4_combainer.contains(&host),
+            Host::Ipv6(host) => self.ipv6_combainer.contains(&host),
+            Host::Domain(host) => self.match_cn_domain(&host),
         }
     }
 
@@ -259,9 +258,10 @@ mod tests {
         assert_eq!(res, false);
         let host = Url::parse("http://www.google.com")?
             .host()
-            .map(|x| x.to_owned());
+            .map(|x| x.to_owned())
+            .unwrap();
         println!("host: {:?}", host);
-        let res3 = ins.traffic_stream(host);
+        let res3 = ins.traffic_stream(&host);
         assert_eq!(res3, false);
         Ok(())
     }

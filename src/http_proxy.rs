@@ -13,8 +13,7 @@ use tokio::signal::unix::{signal, SignalKind};
 #[cfg(windows)]
 use tokio::signal::windows::ctrl_c;
 use tokio::time::timeout;
-use url::Host;
-use url::Url;
+use url::{Host, ParseError, Url};
 
 use crate::types::{KittyProxyError, ResponseCode};
 use crate::MatchProxy;
@@ -172,16 +171,16 @@ where
         } else {
             Duration::from_millis(500)
         };
-        trace!("req.target_server: {}", req.target_server);
-        let match_res = match_proxy.traffic_stream(req.host);
+
+        let match_res = match_proxy.traffic_stream(&req.host);
         let target_server = if match_res {
             trace!("direct connect");
-            req.target_server
+            format!("{}:{}", req.host, req.port)
         } else {
             trace!("proxy connect");
             format!("{vpn_host}:{vpn_port}")
         };
-
+        trace!("req.target_server: {}", target_server);
         let mut target_stream =
             timeout(
                 time_out,
@@ -215,8 +214,8 @@ where
 #[allow(dead_code)]
 struct HttpReq {
     pub method: String,
-    pub host: Option<Host>,
-    pub target_server: String,
+    pub host: Host,
+    pub port: u16,
     pub readed_buffer: Vec<u8>,
 }
 
@@ -257,12 +256,12 @@ impl HttpReq {
         let url = Url::parse(&origin_path)?;
         let host = url.host().map(|x| x.to_owned());
         let port = url.port().unwrap_or(80);
-        let host_str = host.clone().expect("request host is invalid");
+        let host = host.ok_or(ParseError::EmptyHost)?;
         trace!("host: {:?}", host);
         Ok(HttpReq {
             method: method.to_string(),
             host,
-            target_server: format!("{host_str}:{port}"),
+            port,
             readed_buffer: request_headers.join("").as_bytes().to_vec(),
         })
     }
