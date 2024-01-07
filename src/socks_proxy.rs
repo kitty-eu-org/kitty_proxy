@@ -206,7 +206,7 @@ impl SocksProxy {
         }
     }
 
-    async fn quit(&self) {
+    pub async fn quit(&self) {
         #[cfg(unix)]
         {
             let mut term = signal(SignalKind::terminate())
