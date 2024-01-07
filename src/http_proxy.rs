@@ -120,13 +120,17 @@ impl HttpProxy {
     pub async fn quit(&self) {
         println!("quit called");
         self.shutdown_flag.store(true, Ordering::Relaxed);
-        let local_addr = self.listener.lock().await.local_addr().unwrap();
-        let res = TcpStream::connect(local_addr).await;
-        match res {
-            Ok(_) => {},
-            Err(error) => {println!("error: {}", error)}
+        let local_addr = self.listener.lock().await.local_addr();
+        match local_addr {
+            Ok(local_addr)=> {
+                let res = TcpStream::connect(local_addr).await;
+                match res {
+                    Ok(_) => {},
+                    Err(error) => {println!("error: {}", error)}
+                }
+            },
+            Err(_)=> {println!("quit error!!!")}
         }
-
         println!("aaa");
     }
 }
@@ -289,7 +293,7 @@ mod tests {
         });
         trace!("call quit before");
         // let _ = proxy.serve(arc_match_proxy_clone).await;
-        // proxy_clone.quit().await;
+        proxy_clone.quit().await;
 
         thread::sleep(Duration::from_secs(20));
         Ok(())
