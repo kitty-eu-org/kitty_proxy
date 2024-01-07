@@ -3,6 +3,7 @@ use log::{debug, error, info, trace, warn};
 
 use anyhow::anyhow;
 use std::io;
+use std::os::fd::AsFd;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -12,6 +13,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::signal::unix::{signal, SignalKind};
 #[cfg(windows)]
 use tokio::signal::windows::ctrl_c;
+use tokio::sync::Mutex;
 use tokio::time::timeout;
 use url::{Host, ParseError, Url};
 
@@ -47,11 +49,12 @@ impl HttpReply {
     }
 }
 
+#[derive(Clone)]
 pub struct HttpProxy {
-    listener: TcpListener,
+    listener: Arc<Mutex<TcpListener>>,
     // Timeout for connections
     timeout: Option<Duration>,
-    shutdown_flag: AtomicBool,
+    shutdown_flag: Arc<AtomicBool>,
     vpn_host: String,
     vpn_port: u16,
 }
@@ -66,10 +69,12 @@ impl HttpProxy {
         vpn_port: u16,
     ) -> io::Result<Self> {
         info!("Listening on {}:{}", ip, port);
+        let listener = TcpListener::bind((ip, port)).await?;
+        let listener = Arc::new(Mutex::new(listener));
         Ok(Self {
-            listener: TcpListener::bind((ip, port)).await?,
+            listener,
             timeout,
-            shutdown_flag: AtomicBool::new(false),
+            shutdown_flag: Arc::new(AtomicBool::new(false)),
             vpn_host: vpn_host.to_string(),
             vpn_port,
         })
@@ -78,7 +83,12 @@ impl HttpProxy {
     pub async fn serve(&mut self, match_proxy: Arc<MatchProxy>) {
         info!("Serving Connections...");
 
-        while let Ok((stream, client_addr)) = self.listener.accept().await {
+        while let Ok((stream, client_addr)) = self.listener.lock().await.accept().await {
+            println!("serve incoming!!!");
+            if self.shutdown_flag.load(Ordering::Relaxed) {
+                println!("shutdown");
+                return;
+            }
             let timeout = self.timeout.clone();
             let vpn_host = self.vpn_host.clone();
             let vpn_port = self.vpn_port.clone();
@@ -108,32 +118,16 @@ impl HttpProxy {
     }
 
     pub async fn quit(&self) {
-        #[cfg(unix)]
-        {
-            let mut term = signal(SignalKind::terminate())
-                .expect("Failed to register terminate signal handler");
-            let mut interrupt = signal(SignalKind::interrupt())
-                .expect("Failed to register interrupt signal handler");
-
-            tokio::select! {
-                _ = term.recv() => {
-                    println!("Received terminate signal");
-                }
-                _ = interrupt.recv() => {
-                    println!("Received interrupt signal");
-                }
-            }
-
-            self.shutdown_flag.store(true, Ordering::Relaxed);
+        println!("quit called");
+        self.shutdown_flag.store(true, Ordering::Relaxed);
+        let local_addr = self.listener.lock().await.local_addr().unwrap();
+        let res = TcpStream::connect(local_addr).await;
+        match res {
+            Ok(_) => {},
+            Err(error) => {println!("error: {}", error)}
         }
 
-        #[cfg(windows)]
-        {
-            let _ = ctrl_c().await;
-            println!("Received Ctrl+C signal");
-
-            self.shutdown_flag.store(true, Ordering::Relaxed);
-        }
+        println!("aaa");
     }
 }
 
@@ -264,5 +258,40 @@ impl HttpReq {
             port,
             readed_buffer: request_headers.join("").as_bytes().to_vec(),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use anyhow::Ok;
+
+    use super::*;
+    use std::path::PathBuf;
+    use std::str::FromStr;
+    use std::thread;
+
+    #[tokio::test]
+    async fn it_works() -> anyhow::Result<()> {
+        let geoip_file = "/home/hezhaozhao/opensource/kitty/src-tauri/binaries/geoip.dat";
+        let geosite_file = "/home/hezhaozhao/opensource/kitty/src-tauri/binaries/geosite.dat";
+        let match_proxy = MatchProxy::from_geo_dat(
+            Some(&PathBuf::from_str(geoip_file).unwrap()),
+            Some(&PathBuf::from_str(geosite_file).unwrap()),
+        )
+        .unwrap();
+        let arc_match_proxy = Arc::new(match_proxy);
+        let mut proxy = HttpProxy::new("127.0.0.1", 10088, None, "127.0.0.1", 10809).await?;
+        let proxy_clone = proxy.clone();
+        let arc_match_proxy_clone = arc_match_proxy.clone();
+        trace!("aaaaa");
+        tokio::spawn(async move {
+            let _ = proxy.serve(arc_match_proxy_clone).await;
+        });
+        trace!("call quit before");
+        // let _ = proxy.serve(arc_match_proxy_clone).await;
+        // proxy_clone.quit().await;
+
+        thread::sleep(Duration::from_secs(20));
+        Ok(())
     }
 }
