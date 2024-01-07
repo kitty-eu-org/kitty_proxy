@@ -3,16 +3,12 @@ use log::{debug, error, info, trace, warn};
 
 use anyhow::anyhow;
 use std::io;
-use std::os::fd::AsFd;
+use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
-#[cfg(unix)]
-use tokio::signal::unix::{signal, SignalKind};
-#[cfg(windows)]
-use tokio::signal::windows::ctrl_c;
 use tokio::sync::Mutex;
 use tokio::time::timeout;
 use url::{Host, ParseError, Url};
@@ -80,6 +76,10 @@ impl HttpProxy {
         })
     }
 
+    pub async fn get_local_addr(&self) -> SocketAddr {
+        self.listener.lock().await.local_addr().unwrap()
+    }
+
     pub async fn serve(&mut self, match_proxy: Arc<MatchProxy>) {
         info!("Serving Connections...");
 
@@ -87,7 +87,7 @@ impl HttpProxy {
             println!("serve incoming!!!");
             if self.shutdown_flag.load(Ordering::Relaxed) {
                 println!("shutdown");
-                return;
+                break;
             }
             let timeout = self.timeout.clone();
             let vpn_host = self.vpn_host.clone();
@@ -117,21 +117,18 @@ impl HttpProxy {
         }
     }
 
-    pub async fn quit(&self) {
+    pub async fn quit(&self, local_addr: &str) {
         println!("quit called");
         self.shutdown_flag.store(true, Ordering::Relaxed);
-        let local_addr = self.listener.lock().await.local_addr();
-        match local_addr {
-            Ok(local_addr)=> {
-                let res = TcpStream::connect(local_addr).await;
-                match res {
-                    Ok(_) => {},
-                    Err(error) => {println!("error: {}", error)}
-                }
-            },
-            Err(_)=> {println!("quit error!!!")}
+        // let local_addr = self.listener.lock().await.local_addr();
+        println!("local_addr: {:?}", local_addr);
+        let res = TcpStream::connect(local_addr).await;
+        match res {
+            Ok(_) => {}
+            Err(error) => {
+                println!("error: {}", error)
+            }
         }
-        println!("aaa");
     }
 }
 
@@ -272,7 +269,6 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
     use std::str::FromStr;
-    use std::thread;
 
     #[tokio::test]
     async fn it_works() -> anyhow::Result<()> {
@@ -291,11 +287,15 @@ mod tests {
         tokio::spawn(async move {
             let _ = proxy.serve(arc_match_proxy_clone).await;
         });
+        let local_addr = proxy_clone.get_local_addr().await;
+        println!("{:?}", local_addr);
         trace!("call quit before");
-        // let _ = proxy.serve(arc_match_proxy_clone).await;
-        proxy_clone.quit().await;
 
-        thread::sleep(Duration::from_secs(20));
+        tokio::time::sleep(Duration::from_secs(20)).await;
+        // let _ = proxy.serve(arc_match_proxy_clone).await;
+        proxy_clone.quit(local_addr.to_string().as_str()).await;
+
+        tokio::time::sleep(Duration::from_secs(20)).await;
         Ok(())
     }
 }
