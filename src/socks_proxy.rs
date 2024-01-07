@@ -451,22 +451,22 @@ impl SOCKSReq {
             AddrType::Domain => {
                 let mut dlen = [0u8; 1];
                 stream.read_exact(&mut dlen).await?;
-                merged_data.extend_from_slice(&dlen);
+                // merged_data.extend_from_slice(&dlen);
                 let mut domain = vec![0u8; dlen[0] as usize];
                 stream.read_exact(&mut domain).await?;
-                merged_data.extend_from_slice(&domain);
+                // merged_data.extend_from_slice(&domain);
                 domain
             }
             AddrType::V4 => {
                 let mut addr: [u8; 4] = [0u8; 4];
                 stream.read_exact(&mut addr).await?;
-                merged_data.extend_from_slice(&addr);
+                // merged_data.extend_from_slice(&addr);
                 addr.to_vec()
             }
             AddrType::V6 => {
                 let mut addr = [0u8; 16];
                 stream.read_exact(&mut addr).await?;
-                merged_data.extend_from_slice(&addr);
+                // merged_data.extend_from_slice(&addr);
                 addr.to_vec()
             }
         };
