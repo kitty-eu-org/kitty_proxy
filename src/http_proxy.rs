@@ -45,10 +45,8 @@ impl HttpReply {
     }
 }
 
-#[derive(Clone)]
 pub struct HttpProxy {
-    listener: Arc<Mutex<TcpListener>>,
-    // Timeout for connections
+    listener: TcpListener,
     timeout: Option<Duration>,
     shutdown_flag: Arc<AtomicBool>,
     vpn_host: String,
@@ -66,7 +64,6 @@ impl HttpProxy {
     ) -> io::Result<Self> {
         info!("Listening on {}:{}", ip, port);
         let listener = TcpListener::bind((ip, port)).await?;
-        let listener = Arc::new(Mutex::new(listener));
         Ok(Self {
             listener,
             timeout,
@@ -76,17 +73,12 @@ impl HttpProxy {
         })
     }
 
-    pub async fn get_local_addr(&self) -> SocketAddr {
-        self.listener.lock().await.local_addr().unwrap()
-    }
-
     pub async fn serve(&mut self, match_proxy: Arc<MatchProxy>) {
         info!("Serving Connections...");
 
-        while let Ok((stream, client_addr)) = self.listener.lock().await.accept().await {
+        while let Ok((stream, client_addr)) = self.listener.accept().await {
             println!("serve incoming!!!");
             if self.shutdown_flag.load(Ordering::Relaxed) {
-                println!("shutdown");
                 break;
             }
             let timeout = self.timeout.clone();
@@ -281,19 +273,18 @@ mod tests {
         .unwrap();
         let arc_match_proxy = Arc::new(match_proxy);
         let mut proxy = HttpProxy::new("127.0.0.1", 10088, None, "127.0.0.1", 10809).await?;
-        let proxy_clone = proxy.clone();
         let arc_match_proxy_clone = arc_match_proxy.clone();
         trace!("aaaaa");
         tokio::spawn(async move {
             let _ = proxy.serve(arc_match_proxy_clone).await;
         });
-        let local_addr = proxy_clone.get_local_addr().await;
-        println!("{:?}", local_addr);
-        trace!("call quit before");
+
+        drop(proxy);
+        println!("drop proxy");
 
         tokio::time::sleep(Duration::from_secs(20)).await;
         // let _ = proxy.serve(arc_match_proxy_clone).await;
-        proxy_clone.quit(local_addr.to_string().as_str()).await;
+        // proxy_clone.quit(local_addr.to_string().as_str()).await;
 
         tokio::time::sleep(Duration::from_secs(20)).await;
         Ok(())
