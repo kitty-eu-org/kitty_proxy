@@ -288,7 +288,6 @@ where
                 trace!("req.target_server: {}", target_server);
 
                 let mut target_stream = if match_res {
-                    trace!("direct connect");
                     timeout(
                         time_out,
                         async move { TcpStream::connect(target_server).await },
@@ -296,16 +295,20 @@ where
                     .await
                     .map_err(|_| KittyProxyError::Proxy(ResponseCode::ConnectionRefused))??
                 } else {
-                    trace!("proxy connect");
                     timeout(time_out, async move {
                         TcpStream::connect(format!("{vpn_host}:{vpn_port}")).await
                     })
                     .await
                     .map_err(|_| KittyProxyError::Proxy(ResponseCode::ConnectionRefused))??
                 };
-
                 trace!("Connected!");
-                target_stream.write_all(&req.readed_buffer).await?;
+                if !match_res {
+                    target_stream.write_all(&req.readed_buffer).await?;
+                }
+                SocksReply::new(ResponseCode::Success)
+                    .send(&mut self.stream)
+                    .await?;
+
                 trace!("copy bidirectional");
                 match tokio::io::copy_bidirectional(&mut self.stream, &mut target_stream).await {
                     // ignore not connected for shutdown error
