@@ -20,6 +20,7 @@ cidr = { version = "0.2.2", features = ["bitstring", "serde"] }
 regex = "1.10.2"
 addr = "0.15.6"
 url = {version = "2.5.0", features = ["serde"]}
+tokio-util = "0.7.10"
 
 
 [build-dependencies]

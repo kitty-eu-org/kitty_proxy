@@ -3,14 +3,14 @@ use log::{debug, error, info, trace, warn};
 
 use anyhow::anyhow;
 use std::io;
-use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::Mutex;
+use tokio::sync::watch::Receiver;
 use tokio::time::timeout;
+use tokio_util::sync::CancellationToken;
 use url::{Host, ParseError, Url};
 
 use crate::types::{KittyProxyError, ResponseCode};
@@ -46,8 +46,10 @@ impl HttpReply {
 }
 
 pub struct HttpProxy {
-    listener: TcpListener,
+    ip: String,
+    port: u16,
     timeout: Option<Duration>,
+    exit_token: CancellationToken,
     shutdown_flag: Arc<AtomicBool>,
     vpn_host: String,
     vpn_port: u16,
@@ -63,32 +65,41 @@ impl HttpProxy {
         vpn_port: u16,
     ) -> io::Result<Self> {
         info!("Listening on {}:{}", ip, port);
-        let listener = TcpListener::bind((ip, port)).await?;
+
+        let exit_token = CancellationToken::new();
         Ok(Self {
-            listener,
+            ip: ip.to_string(),
+            port: port,
             timeout,
+            exit_token,
             shutdown_flag: Arc::new(AtomicBool::new(false)),
             vpn_host: vpn_host.to_string(),
             vpn_port,
         })
     }
 
-    pub async fn serve(&mut self, match_proxy: Arc<MatchProxy>) {
+    pub async fn serve(&mut self, match_proxy: Arc<MatchProxy>, rx: &mut Receiver<bool>) {
+        let listener = TcpListener::bind((self.ip.clone(), self.port))
+            .await
+            .unwrap();
         info!("Serving Connections...");
-
-        while let Ok((stream, client_addr)) = self.listener.accept().await {
-            println!("serve incoming!!!");
-            if self.shutdown_flag.load(Ordering::Relaxed) {
-                break;
-            }
-            let timeout = self.timeout.clone();
-            let vpn_host = self.vpn_host.clone();
-            let vpn_port = self.vpn_port.clone();
-            let match_proxy_clone = Arc::clone(&match_proxy);
-            tokio::spawn(async move {
-                let mut client = HttpClient::new(stream, timeout);
+        let timeout = self.timeout.clone();
+        let vpn_host = self.vpn_host.clone();
+        let vpn_port = self.vpn_port.clone();
+        let match_proxy_clone = Arc::clone(&match_proxy);
+        let mut rx_clone = rx.clone();
+        tokio::spawn(async move {
+            tokio::select! {
+                _ = async {
+                    loop {
+                        println!("loop");
+                        let (stream, client_addr) = listener.accept().await.unwrap();
+                        let match_proxy_clone = match_proxy_clone.clone();
+                        let vpn_host_clone = vpn_host.clone();
+                        tokio::spawn(async move {
+                            let mut client = HttpClient::new(stream, timeout);
                 match client
-                    .handle_client(match_proxy_clone.as_ref(), vpn_host.as_str(), vpn_port)
+                    .handle_client(match_proxy_clone.as_ref(), vpn_host_clone.as_str(), vpn_port)
                     .await
                 {
                     Ok(_) => {}
@@ -105,22 +116,18 @@ impl HttpProxy {
                         };
                     }
                 };
-            });
-        }
-    }
 
-    pub async fn quit(&self, local_addr: &str) {
-        println!("quit called");
-        self.shutdown_flag.store(true, Ordering::Relaxed);
-        // let local_addr = self.listener.lock().await.local_addr();
-        println!("local_addr: {:?}", local_addr);
-        let res = TcpStream::connect(local_addr).await;
-        match res {
-            Ok(_) => {}
-            Err(error) => {
-                println!("error: {}", error)
+                         });
+                    }
+                } => {}
+                _ =  async {
+                        if rx_clone.changed().await.is_ok() {
+                            println!("exit");
+                            return//该任务退出，别的也会停
+                    }
+                } => {}
             }
-        }
+        });
     }
 }
 
@@ -257,6 +264,8 @@ impl HttpReq {
 #[cfg(test)]
 mod tests {
     use anyhow::Ok;
+    use tokio::select;
+    use tokio::sync::watch;
 
     use super::*;
     use std::path::PathBuf;
@@ -275,18 +284,15 @@ mod tests {
         let mut proxy = HttpProxy::new("127.0.0.1", 10088, None, "127.0.0.1", 10809).await?;
         let arc_match_proxy_clone = arc_match_proxy.clone();
         trace!("aaaaa");
+        let (kill_tx, mut kill_rx) = watch::channel(false);
         tokio::spawn(async move {
-            let _ = proxy.serve(arc_match_proxy_clone).await;
+            proxy.serve(arc_match_proxy_clone, &mut kill_rx).await;
         });
 
-        drop(proxy);
+        tokio::time::sleep(Duration::from_secs(10)).await;
         println!("drop proxy");
-
-        tokio::time::sleep(Duration::from_secs(20)).await;
-        // let _ = proxy.serve(arc_match_proxy_clone).await;
-        // proxy_clone.quit(local_addr.to_string().as_str()).await;
-
-        tokio::time::sleep(Duration::from_secs(20)).await;
+        tokio::spawn(async move { kill_tx.send(true).unwrap_or(()) });
+        tokio::time::sleep(Duration::from_secs(10)).await;
         Ok(())
     }
 }
