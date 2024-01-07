@@ -304,10 +304,13 @@ where
                 trace!("Connected!");
                 if !match_res {
                     target_stream.write_all(&req.readed_buffer).await?;
+                } else {
+                    let mut header = [0u8; 2];
+                    target_stream.read_exact(&mut header).await?;
+                    SocksReply::new(ResponseCode::Success)
+                        .send(&mut self.stream)
+                        .await?;
                 }
-                SocksReply::new(ResponseCode::Success)
-                    .send(&mut self.stream)
-                    .await?;
 
                 trace!("copy bidirectional");
                 match tokio::io::copy_bidirectional(&mut self.stream, &mut target_stream).await {
