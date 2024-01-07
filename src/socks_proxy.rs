@@ -304,9 +304,8 @@ where
                 trace!("Connected!");
                 if !match_res {
                     target_stream.write_all(&req.readed_buffer).await?;
-                    let mut header = [0u8; 2];
-                    target_stream.read_exact(&mut header).await?;
-                    trace!("proxy target_stream read auth res: {:?}", header);
+                    let mut _header = [0u8; 2];
+                    target_stream.read_exact(&mut _header).await?;
                 } else {
                     SocksReply::new(ResponseCode::Success)
                         .send(&mut self.stream)
