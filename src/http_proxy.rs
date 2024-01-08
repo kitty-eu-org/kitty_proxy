@@ -264,7 +264,6 @@ impl HttpReq {
 #[cfg(test)]
 mod tests {
     use anyhow::Ok;
-    use tokio::select;
     use tokio::sync::watch;
 
     use super::*;

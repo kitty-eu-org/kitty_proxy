@@ -4,6 +4,7 @@
 
 use anyhow::{anyhow, Result};
 use log::{debug, error, info, trace, warn};
+use tokio::sync::watch::Receiver;
 use url::Host;
 
 use std::io;
@@ -148,8 +149,9 @@ impl SockCommand {
 }
 
 pub struct SocksProxy {
-    listener: TcpListener,
     // Timeout for connections
+    ip: String,
+    port: u16,
     timeout: Option<Duration>,
     shutdown_flag: AtomicBool,
     vpn_host: String,
@@ -167,7 +169,8 @@ impl SocksProxy {
     ) -> io::Result<Self> {
         info!("Listening on {}:{}", ip, port);
         Ok(Self {
-            listener: TcpListener::bind((ip, port)).await?,
+            ip: ip.to_string(),
+            port,
             timeout,
             shutdown_flag: AtomicBool::new(false),
             vpn_host: vpn_host.to_string(),
@@ -175,35 +178,52 @@ impl SocksProxy {
         })
     }
 
-    pub async fn serve(&mut self, match_proxy: Arc<MatchProxy>) {
+    pub async fn serve(&mut self, match_proxy: Arc<MatchProxy>, rx: &mut Receiver<bool>) {
         info!("Serving Connections...");
-        while let Ok((stream, client_addr)) = self.listener.accept().await {
-            let timeout = self.timeout.clone();
-            let match_proxy_clone = Arc::clone(&match_proxy);
-            let vpn_host = self.vpn_host.clone();
-            let vpn_port = self.vpn_port.clone();
-            tokio::spawn(async move {
-                let mut client = SOCKClient::new(stream, timeout);
-                match client
-                    .handle_client(match_proxy_clone.as_ref(), vpn_host.as_str(), vpn_port)
-                    .await
-                {
-                    Ok(_) => {}
-                    Err(error) => {
-                        error!("Error! {:?}, client: {:?}", error, client_addr);
+        let listener = TcpListener::bind((self.ip.clone(), self.port))
+            .await
+            .unwrap();
+        let timeout = self.timeout.clone();
+        let match_proxy_clone = Arc::clone(&match_proxy);
+        let vpn_host = self.vpn_host.clone();
+        let vpn_port = self.vpn_port.clone();
+        let mut rx_clone = rx.clone();
+        tokio::spawn(async move {
+            tokio::select! {
+                _ = async {
+                    loop {
+                        println!("loop");
+                        let (stream, client_addr) = listener.accept().await.unwrap();
+                        let match_proxy_clone = match_proxy_clone.clone();
+                        let mut client = SOCKClient::new(stream, timeout);
+            match client
+                .handle_client(match_proxy_clone.as_ref(), vpn_host.as_str(), vpn_port)
+                .await
+            {
+                Ok(_) => {}
+                Err(error) => {
+                    error!("Error! {:?}, client: {:?}", error, client_addr);
 
-                        if let Err(e) = SocksReply::new(error.into()).send(&mut client.stream).await
-                        {
-                            warn!("Failed to send error code: {:?}", e);
-                        }
-
-                        if let Err(e) = client.shutdown().await {
-                            warn!("Failed to shutdown TcpStream: {:?}", e);
-                        };
+                    if let Err(e) = SocksReply::new(error.into()).send(&mut client.stream).await
+                    {
+                        warn!("Failed to send error code: {:?}", e);
                     }
-                };
-            });
-        }
+
+                    if let Err(e) = client.shutdown().await {
+                        warn!("Failed to shutdown TcpStream: {:?}", e);
+                    };
+                }
+            };
+                    }
+                } => {}
+                _ =  async {
+                        if rx_clone.changed().await.is_ok() {
+                            println!("exit");
+                            return//该任务退出，别的也会停
+                    }
+                } => {}
+            }
+        });
     }
 
     pub async fn quit(&self) {
@@ -522,5 +542,39 @@ impl SOCKSReq {
             port,
             readed_buffer,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use anyhow::Ok;
+    use tokio::sync::watch;
+
+    use super::*;
+    use std::path::PathBuf;
+    use std::str::FromStr;
+
+    #[tokio::test]
+    async fn it_works() -> anyhow::Result<()> {
+        let geoip_file = "/Users/hezhaozhao/myself/Furious/Furious/Data/xray/geoip.dat";
+        let geosite_file = "/Users/hezhaozhao/myself/Furious/Furious/Data/xray/geosite.dat";
+        let match_proxy = MatchProxy::from_geo_dat(
+            Some(&PathBuf::from_str(geoip_file).unwrap()),
+            Some(&PathBuf::from_str(geosite_file).unwrap()),
+        )
+        .unwrap();
+        let arc_match_proxy = Arc::new(match_proxy);
+        let mut proxy = SocksProxy::new("127.0.0.1", 10088, None, "127.0.0.1", 10809).await?;
+        let arc_match_proxy_clone = arc_match_proxy.clone();
+        let (kill_tx, mut kill_rx) = watch::channel(false);
+        tokio::spawn(async move {
+            proxy.serve(arc_match_proxy_clone, &mut kill_rx).await;
+        });
+
+        tokio::time::sleep(Duration::from_secs(10)).await;
+        println!("drop proxy");
+        tokio::spawn(async move { kill_tx.send(true).unwrap_or(()) });
+        tokio::time::sleep(Duration::from_secs(10)).await;
+        Ok(())
     }
 }
