@@ -9,7 +9,6 @@ use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::watch::Receiver;
 use tokio::time::timeout;
-use tokio_util::sync::CancellationToken;
 use url::{Host, ParseError, Url};
 
 use crate::types::{KittyProxyError, ResponseCode};
@@ -48,7 +47,6 @@ pub struct HttpProxy {
     ip: String,
     port: u16,
     timeout: Option<Duration>,
-    exit_token: CancellationToken,
     vpn_host: String,
     vpn_port: u16,
 }
@@ -64,12 +62,10 @@ impl HttpProxy {
     ) -> io::Result<Self> {
         info!("Listening on {}:{}", ip, port);
 
-        let exit_token = CancellationToken::new();
         Ok(Self {
             ip: ip.to_string(),
             port: port,
             timeout,
-            exit_token,
             vpn_host: vpn_host.to_string(),
             vpn_port,
         })
