@@ -503,37 +503,3 @@ impl SOCKSReq {
         })
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use anyhow::Ok;
-    use tokio::sync::watch;
-
-    use super::*;
-    use std::path::PathBuf;
-    use std::str::FromStr;
-
-    #[tokio::test]
-    async fn it_works() -> anyhow::Result<()> {
-        let geoip_file = "/Users/hezhaozhao/myself/Furious/Furious/Data/xray/geoip.dat";
-        let geosite_file = "/Users/hezhaozhao/myself/Furious/Furious/Data/xray/geosite.dat";
-        let match_proxy = MatchProxy::from_geo_dat(
-            Some(&PathBuf::from_str(geoip_file).unwrap()),
-            Some(&PathBuf::from_str(geosite_file).unwrap()),
-        )
-        .unwrap();
-        let arc_match_proxy = Arc::new(match_proxy);
-        let mut proxy = SocksProxy::new("127.0.0.1", 10088, None, "127.0.0.1", 10809).await?;
-        let arc_match_proxy_clone = arc_match_proxy.clone();
-        let (kill_tx, mut kill_rx) = watch::channel(false);
-        tokio::spawn(async move {
-            proxy.serve(arc_match_proxy_clone, &mut kill_rx).await;
-        });
-
-        tokio::time::sleep(Duration::from_secs(10)).await;
-        println!("drop proxy");
-        tokio::spawn(async move { kill_tx.send(true).unwrap_or(()) });
-        tokio::time::sleep(Duration::from_secs(10)).await;
-        Ok(())
-    }
-}
