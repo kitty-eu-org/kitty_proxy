@@ -3,7 +3,6 @@ use log::{debug, error, info, trace, warn};
 
 use anyhow::anyhow;
 use std::io;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
@@ -50,7 +49,6 @@ pub struct HttpProxy {
     port: u16,
     timeout: Option<Duration>,
     exit_token: CancellationToken,
-    shutdown_flag: Arc<AtomicBool>,
     vpn_host: String,
     vpn_port: u16,
 }
@@ -72,7 +70,6 @@ impl HttpProxy {
             port: port,
             timeout,
             exit_token,
-            shutdown_flag: Arc::new(AtomicBool::new(false)),
             vpn_host: vpn_host.to_string(),
             vpn_port,
         })

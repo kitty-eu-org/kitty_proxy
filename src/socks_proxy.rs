@@ -1,16 +1,10 @@
-#![forbid(unsafe_code)]
-// #[macro_use]
-// extern crate serde_derive;
-
 use anyhow::{anyhow, Result};
 use log::{debug, error, info, trace, warn};
 use tokio::sync::watch::Receiver;
 use url::Host;
 
 use std::io;
-use std::net::ToSocketAddrs;
-use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::net::{Ipv4Addr, Ipv6Addr};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -19,10 +13,6 @@ use tokio::time::timeout;
 
 use crate::types::{KittyProxyError, ResponseCode};
 use crate::MatchProxy;
-#[cfg(unix)]
-use tokio::signal::unix::{signal, SignalKind};
-#[cfg(windows)]
-use tokio::signal::windows::ctrl_c;
 
 /// Version of socks
 const SOCKS_VERSION: u8 = 0x05;
@@ -153,7 +143,6 @@ pub struct SocksProxy {
     ip: String,
     port: u16,
     timeout: Option<Duration>,
-    shutdown_flag: AtomicBool,
     vpn_host: String,
     vpn_port: u16,
 }
@@ -172,7 +161,6 @@ impl SocksProxy {
             ip: ip.to_string(),
             port,
             timeout,
-            shutdown_flag: AtomicBool::new(false),
             vpn_host: vpn_host.to_string(),
             vpn_port,
         })
@@ -224,35 +212,6 @@ impl SocksProxy {
                 } => {}
             }
         });
-    }
-
-    pub async fn quit(&self) {
-        #[cfg(unix)]
-        {
-            let mut term = signal(SignalKind::terminate())
-                .expect("Failed to register terminate signal handler");
-            let mut interrupt = signal(SignalKind::interrupt())
-                .expect("Failed to register interrupt signal handler");
-
-            tokio::select! {
-                _ = term.recv() => {
-                    println!("Received terminate signal");
-                }
-                _ = interrupt.recv() => {
-                    println!("Received interrupt signal");
-                }
-            }
-
-            self.shutdown_flag.store(true, Ordering::Relaxed);
-        }
-
-        #[cfg(windows)]
-        {
-            let _ = ctrl_c().await;
-            println!("Received Ctrl+C signal");
-
-            self.shutdown_flag.store(true, Ordering::Relaxed);
-        }
     }
 }
 
