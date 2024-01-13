@@ -3,7 +3,7 @@ use log::{debug, error, info, trace, warn};
 
 use anyhow::anyhow;
 use std::io;
-use std::os::unix::net::SocketAddr;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
@@ -82,7 +82,6 @@ impl HttpProxy {
                         println!("loop");
                         let (stream, client_addr) = listener.accept().await.unwrap();
                         let match_proxy_clone = match_proxy_clone.clone();
-                        let vpn_sockt_addr_clone = vpn_sockt_addr_clone.clone();
                         tokio::spawn(async move {
                             let mut client = HttpClient::new(stream, timeout);
                 match client
@@ -158,7 +157,7 @@ where
             format!("{}:{}", req.host, req.port)
         } else {
             trace!("proxy connect");
-            format!("{:?}", vpn_sockt_addr)
+            vpn_sockt_addr.to_string()
         };
         trace!("req.target_server: {}", target_server);
         let mut target_stream =
