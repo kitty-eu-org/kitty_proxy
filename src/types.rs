@@ -2,13 +2,16 @@
 // #[macro_use]
 // extern crate serde_derive;
 
+use std::collections::HashMap;
 use log::error;
 
 use snafu::Snafu;
 use url::ParseError;
 
 use std::io;
+use std::sync::Arc;
 use thiserror::Error;
+use tokio::sync::Mutex;
 
 #[derive(Error, Debug)]
 pub enum KittyProxyError {
@@ -59,3 +62,13 @@ impl From<KittyProxyError> for ResponseCode {
         }
     }
 }
+
+
+#[derive(Default)]
+struct NodeStatistics {
+    bytes_sent: u64,
+    bytes_received: u64,
+    connection_count: u64,
+}
+
+type StatisticsMap = Arc<Mutex<HashMap<String, NodeStatistics>>>;
