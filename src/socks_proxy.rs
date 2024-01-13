@@ -1,10 +1,15 @@
+#![forbid(unsafe_code)]
+// #[macro_use]
+// extern crate serde_derive;
+
 use anyhow::{anyhow, Result};
 use log::{debug, error, info, trace, warn};
-use tokio::sync::watch::Receiver;
 use url::Host;
 
 use std::io;
-use std::net::{Ipv4Addr, Ipv6Addr};
+use std::net::ToSocketAddrs;
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -13,6 +18,10 @@ use tokio::time::timeout;
 
 use crate::types::{KittyProxyError, ResponseCode};
 use crate::MatchProxy;
+#[cfg(unix)]
+use tokio::signal::unix::{signal, SignalKind};
+#[cfg(windows)]
+use tokio::signal::windows::ctrl_c;
 
 /// Version of socks
 const SOCKS_VERSION: u8 = 0x05;
@@ -139,10 +148,10 @@ impl SockCommand {
 }
 
 pub struct SocksProxy {
+    listener: TcpListener,
     // Timeout for connections
-    ip: String,
-    port: u16,
     timeout: Option<Duration>,
+    shutdown_flag: AtomicBool,
     vpn_host: String,
     vpn_port: u16,
 }
@@ -158,60 +167,72 @@ impl SocksProxy {
     ) -> io::Result<Self> {
         info!("Listening on {}:{}", ip, port);
         Ok(Self {
-            ip: ip.to_string(),
-            port,
+            listener: TcpListener::bind((ip, port)).await?,
             timeout,
+            shutdown_flag: AtomicBool::new(false),
             vpn_host: vpn_host.to_string(),
             vpn_port,
         })
     }
 
-    pub async fn serve(&mut self, match_proxy: Arc<MatchProxy>, rx: &mut Receiver<bool>) {
+    pub async fn serve(&mut self, match_proxy: Arc<MatchProxy>) {
         info!("Serving Connections...");
-        let listener = TcpListener::bind((self.ip.clone(), self.port))
-            .await
-            .unwrap();
-        let timeout = self.timeout.clone();
-        let match_proxy_clone = Arc::clone(&match_proxy);
-        let vpn_host = self.vpn_host.clone();
-        let vpn_port = self.vpn_port.clone();
-        let mut rx_clone = rx.clone();
-        tokio::spawn(async move {
+        while let Ok((stream, client_addr)) = self.listener.accept().await {
+            let timeout = self.timeout.clone();
+            let match_proxy_clone = Arc::clone(&match_proxy);
+            let vpn_host = self.vpn_host.clone();
+            let vpn_port = self.vpn_port.clone();
+            tokio::spawn(async move {
+                let mut client = SOCKClient::new(stream, timeout);
+                match client
+                    .handle_client(match_proxy_clone.as_ref(), vpn_host.as_str(), vpn_port)
+                    .await
+                {
+                    Ok(_) => {}
+                    Err(error) => {
+                        error!("Error! {:?}, client: {:?}", error, client_addr);
+
+                        if let Err(e) = SocksReply::new(error.into()).send(&mut client.stream).await
+                        {
+                            warn!("Failed to send error code: {:?}", e);
+                        }
+
+                        if let Err(e) = client.shutdown().await {
+                            warn!("Failed to shutdown TcpStream: {:?}", e);
+                        };
+                    }
+                };
+            });
+        }
+    }
+
+    pub async fn quit(&self) {
+        #[cfg(unix)]
+        {
+            let mut term = signal(SignalKind::terminate())
+                .expect("Failed to register terminate signal handler");
+            let mut interrupt = signal(SignalKind::interrupt())
+                .expect("Failed to register interrupt signal handler");
+
             tokio::select! {
-                _ = async {
-                    loop {
-                        println!("loop");
-                        let (stream, client_addr) = listener.accept().await.unwrap();
-                        let match_proxy_clone = match_proxy_clone.clone();
-                        let mut client = SOCKClient::new(stream, timeout);
-            match client
-                .handle_client(match_proxy_clone.as_ref(), vpn_host.as_str(), vpn_port)
-                .await
-            {
-                Ok(_) => {}
-                Err(error) => {
-                    error!("Error! {:?}, client: {:?}", error, client_addr);
-
-                    if let Err(e) = SocksReply::new(error.into()).send(&mut client.stream).await
-                    {
-                        warn!("Failed to send error code: {:?}", e);
-                    }
-
-                    if let Err(e) = client.shutdown().await {
-                        warn!("Failed to shutdown TcpStream: {:?}", e);
-                    };
+                _ = term.recv() => {
+                    println!("Received terminate signal");
                 }
-            };
-                    }
-                } => {}
-                _ =  async {
-                        if rx_clone.changed().await.is_ok() {
-                            println!("exit");
-                            return//该任务退出，别的也会停
-                    }
-                } => {}
+                _ = interrupt.recv() => {
+                    println!("Received interrupt signal");
+                }
             }
-        });
+
+            self.shutdown_flag.store(true, Ordering::Relaxed);
+        }
+
+        #[cfg(windows)]
+        {
+            let _ = ctrl_c().await;
+            println!("Received Ctrl+C signal");
+
+            self.shutdown_flag.store(true, Ordering::Relaxed);
+        }
     }
 }
 

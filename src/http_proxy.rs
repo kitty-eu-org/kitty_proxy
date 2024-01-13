@@ -3,6 +3,7 @@ use log::{debug, error, info, trace, warn};
 
 use anyhow::anyhow;
 use std::io;
+use std::os::unix::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
@@ -47,40 +48,33 @@ pub struct HttpProxy {
     ip: String,
     port: u16,
     timeout: Option<Duration>,
-    vpn_host: String,
-    vpn_port: u16,
 }
 
 impl HttpProxy {
-    /// Create a new Merino instance
-    pub async fn new(
-        ip: &str,
-        port: u16,
-        timeout: Option<Duration>,
-        vpn_host: &str,
-        vpn_port: u16,
-    ) -> io::Result<Self> {
+    pub async fn new(ip: &str, port: u16, timeout: Option<Duration>) -> io::Result<Self> {
         info!("Listening on {}:{}", ip, port);
 
         Ok(Self {
             ip: ip.to_string(),
-            port: port,
+            port,
             timeout,
-            vpn_host: vpn_host.to_string(),
-            vpn_port,
         })
     }
 
-    pub async fn serve(&mut self, match_proxy: Arc<MatchProxy>, rx: &mut Receiver<bool>) {
+    pub async fn serve(
+        &mut self,
+        match_proxy: Arc<MatchProxy>,
+        rx: &mut Receiver<bool>,
+        vpn_sockt_addr: &SocketAddr,
+    ) {
         let listener = TcpListener::bind((self.ip.clone(), self.port))
             .await
             .unwrap();
         info!("Serving Connections...");
         let timeout = self.timeout.clone();
-        let vpn_host = self.vpn_host.clone();
-        let vpn_port = self.vpn_port.clone();
         let match_proxy_clone = Arc::clone(&match_proxy);
         let mut rx_clone = rx.clone();
+        let vpn_sockt_addr_clone = vpn_sockt_addr.clone();
         tokio::spawn(async move {
             tokio::select! {
                 _ = async {
@@ -88,11 +82,11 @@ impl HttpProxy {
                         println!("loop");
                         let (stream, client_addr) = listener.accept().await.unwrap();
                         let match_proxy_clone = match_proxy_clone.clone();
-                        let vpn_host_clone = vpn_host.clone();
+                        let vpn_sockt_addr_clone = vpn_sockt_addr_clone.clone();
                         tokio::spawn(async move {
                             let mut client = HttpClient::new(stream, timeout);
                 match client
-                    .handle_client(match_proxy_clone.as_ref(), vpn_host_clone.as_str(), vpn_port)
+                    .handle_client(match_proxy_clone.as_ref(), &vpn_sockt_addr_clone)
                     .await
                 {
                     Ok(_) => {}
@@ -148,8 +142,7 @@ where
     pub async fn handle_client(
         &mut self,
         match_proxy: &MatchProxy,
-        vpn_host: &str,
-        vpn_port: u16,
+        vpn_sockt_addr: &SocketAddr,
     ) -> Result<usize, KittyProxyError> {
         debug!("Starting to relay data");
         let req: HttpReq = HttpReq::from_stream(&mut self.stream).await?;
@@ -165,7 +158,7 @@ where
             format!("{}:{}", req.host, req.port)
         } else {
             trace!("proxy connect");
-            format!("{vpn_host}:{vpn_port}")
+            format!("{:?}", vpn_sockt_addr)
         };
         trace!("req.target_server: {}", target_server);
         let mut target_stream =
