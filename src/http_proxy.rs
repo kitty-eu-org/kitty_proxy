@@ -38,8 +38,8 @@ impl HttpReply {
     }
 
     pub async fn send<T>(&self, stream: &mut T) -> io::Result<()>
-    where
-        T: AsyncRead + AsyncWrite + Send + Unpin + 'static,
+        where
+            T: AsyncRead + AsyncWrite + Send + Unpin + 'static,
     {
         stream.write_all(&self.buf[..]).await?;
         Ok(())
@@ -129,8 +129,8 @@ pub struct HttpClient<T: AsyncRead + AsyncWrite + Send + Unpin + 'static> {
 }
 
 impl<T> HttpClient<T>
-where
-    T: AsyncRead + AsyncWrite + Send + Unpin + 'static,
+    where
+        T: AsyncRead + AsyncWrite + Send + Unpin + 'static,
 {
     /// Create a new SOCKClient
     pub fn new(stream: T, timeout: Option<Duration>) -> Self {
@@ -178,8 +178,8 @@ where
                 time_out,
                 async move { TcpStream::connect(target_server).await },
             )
-            .await
-            .map_err(|_| KittyProxyError::Proxy(ResponseCode::ConnectionRefused))??;
+                .await
+                .map_err(|_| KittyProxyError::Proxy(ResponseCode::ConnectionRefused))??;
         if match_res {
             let mut vpn_node_statistics = vpn_node_statistics_map.lock().await;
             let vpn_node_statistics = vpn_node_statistics.as_mut().unwrap();
@@ -204,13 +204,13 @@ where
                 }
                 Err(e) => Err(KittyProxyError::Io(e)),
                 Ok((_s_to_t, t_to_s)) => Ok(t_to_s as usize),
-            }?;
+            };
         if match_res {
             let mut vpn_node_statistics = vpn_node_statistics_map.lock().await;
             let vpn_node_statistics = vpn_node_statistics.as_mut().unwrap();
             vpn_node_statistics.decre_count_by_node_info(&node_info.unwrap());
         }
-        Ok(return_value)
+        return_value
     }
 }
 
@@ -226,8 +226,8 @@ struct HttpReq {
 impl HttpReq {
     /// Parse a SOCKS Req from a TcpStream
     async fn from_stream<T>(stream: &mut T) -> Result<Self, KittyProxyError>
-    where
-        T: AsyncRead + AsyncWrite + Send + Unpin + 'static,
+        where
+            T: AsyncRead + AsyncWrite + Send + Unpin + 'static,
     {
         let mut request_headers: Vec<String> = Vec::new();
         let mut reader: BufReader<&mut T> = BufReader::new(stream);

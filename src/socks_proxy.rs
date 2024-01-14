@@ -4,14 +4,15 @@ use tokio::sync::watch::Receiver;
 use url::Host;
 
 use std::io;
-use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::net::{Ipv4Addr, Ipv6Addr};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::Mutex;
 use tokio::time::timeout;
 
-use crate::types::{KittyProxyError, ResponseCode};
+use crate::types::{KittyProxyError, NodeInfo, NodeStatistics, ResponseCode, StatisticsMap};
 use crate::MatchProxy;
 
 /// Version of socks
@@ -78,8 +79,8 @@ impl SocksReply {
     }
 
     pub async fn send<T>(&self, stream: &mut T) -> io::Result<()>
-    where
-        T: AsyncRead + AsyncWrite + Send + Unpin + 'static,
+        where
+            T: AsyncRead + AsyncWrite + Send + Unpin + 'static,
     {
         stream.write_all(&self.buf[..]).await?;
         Ok(())
@@ -143,6 +144,7 @@ pub struct SocksProxy {
     ip: String,
     port: u16,
     timeout: Option<Duration>,
+    node_statistics_map: StatisticsMap,
 }
 
 impl SocksProxy {
@@ -153,6 +155,7 @@ impl SocksProxy {
             ip: ip.to_string(),
             port,
             timeout,
+            node_statistics_map: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -160,7 +163,7 @@ impl SocksProxy {
         &mut self,
         match_proxy: Arc<MatchProxy>,
         rx: &mut Receiver<bool>,
-        vpn_socket_addr: &SocketAddr,
+        vpn_node_infos: Vec<NodeInfo>,
     ) {
         info!("Serving Connections...");
         let listener = TcpListener::bind((self.ip.clone(), self.port))
@@ -168,8 +171,11 @@ impl SocksProxy {
             .unwrap();
         let timeout = self.timeout.clone();
         let match_proxy_clone = Arc::clone(&match_proxy);
-        let vpn_socket_addr_clone = vpn_socket_addr.clone();
         let mut rx_clone = rx.clone();
+        let mut statistics_map = self.node_statistics_map.lock().await;
+        *statistics_map = Some(NodeStatistics::from_vec(&vpn_node_infos));
+        drop(statistics_map);
+        let statistics_map_clone = Arc::clone(&self.node_statistics_map);
         tokio::spawn(async move {
             tokio::select! {
                 _ = async {
@@ -177,9 +183,10 @@ impl SocksProxy {
                         println!("loop");
                         let (stream, client_addr) = listener.accept().await.unwrap();
                         let match_proxy_clone = match_proxy_clone.clone();
+                        let statistics_map_clone = statistics_map_clone.clone();
                         let mut client = SOCKClient::new(stream, timeout);
             match client
-                .handle_client(match_proxy_clone.as_ref(), &vpn_socket_addr_clone)
+                .handle_client(match_proxy_clone.as_ref(), statistics_map_clone)
                 .await
             {
                 Ok(_) => {}
@@ -215,8 +222,8 @@ pub struct SOCKClient<T: AsyncRead + AsyncWrite + Send + Unpin + 'static> {
 }
 
 impl<T> SOCKClient<T>
-where
-    T: AsyncRead + AsyncWrite + Send + Unpin + 'static,
+    where
+        T: AsyncRead + AsyncWrite + Send + Unpin + 'static,
 {
     /// Create a new SOCKClient
     pub fn new(stream: T, timeout: Option<Duration>) -> Self {
@@ -233,7 +240,7 @@ where
     pub async fn handle_client(
         &mut self,
         match_proxy: &MatchProxy,
-        vpn_socket_addr: &SocketAddr,
+        vpn_node_statistics_map: StatisticsMap,
     ) -> Result<usize, KittyProxyError> {
         let req = SOCKSReq::from_stream(&mut self.stream).await?;
 
@@ -250,12 +257,20 @@ where
                 };
 
                 let match_res = match_proxy.traffic_stream(&req.host);
+
+                let node_info = if !match_res {
+                    let vpn_node_statistics = vpn_node_statistics_map.lock().await;
+                    let vpn_node_statistics_ref = vpn_node_statistics.as_ref().unwrap();
+                    Some(vpn_node_statistics_ref.get_least_connected_node().await)
+                } else {
+                    None
+                };
                 let target_server = if match_res {
                     trace!("direct connect");
                     format!("{}:{}", req.host, req.port)
                 } else {
                     trace!("proxy connect");
-                    vpn_socket_addr.to_string()
+                    node_info.unwrap().socket_addr.to_string()
                 };
                 trace!("req.target_server: {}", target_server);
 
@@ -264,15 +279,21 @@ where
                         time_out,
                         async move { TcpStream::connect(target_server).await },
                     )
-                    .await
-                    .map_err(|_| KittyProxyError::Proxy(ResponseCode::ConnectionRefused))??
+                        .await
+                        .map_err(|_| KittyProxyError::Proxy(ResponseCode::ConnectionRefused))??
                 } else {
                     timeout(time_out, async move {
-                        TcpStream::connect(&vpn_socket_addr).await
+                        TcpStream::connect(&target_server).await
                     })
-                    .await
-                    .map_err(|_| KittyProxyError::Proxy(ResponseCode::ConnectionRefused))??
+                        .await
+                        .map_err(|_| KittyProxyError::Proxy(ResponseCode::ConnectionRefused))??
                 };
+
+                if match_res {
+                    let mut vpn_node_statistics = vpn_node_statistics_map.lock().await;
+                    let vpn_node_statistics = vpn_node_statistics.as_mut().unwrap();
+                    vpn_node_statistics.incre_count_by_node_info(&node_info.unwrap());
+                }
                 trace!("Connected!");
                 if !match_res {
                     target_stream.write_all(&req.readed_buffer).await?;
@@ -285,7 +306,7 @@ where
                 }
 
                 trace!("copy bidirectional");
-                match tokio::io::copy_bidirectional(&mut self.stream, &mut target_stream).await {
+                let return_value = match tokio::io::copy_bidirectional(&mut self.stream, &mut target_stream).await {
                     // ignore not connected for shutdown error
                     Err(e) if e.kind() == std::io::ErrorKind::NotConnected => {
                         trace!("already closed");
@@ -293,7 +314,13 @@ where
                     }
                     Err(e) => Err(KittyProxyError::Io(e)),
                     Ok((_s_to_t, t_to_s)) => Ok(t_to_s as usize),
+                };
+                if match_res {
+                    let mut vpn_node_statistics = vpn_node_statistics_map.lock().await;
+                    let vpn_node_statistics = vpn_node_statistics.as_mut().unwrap();
+                    vpn_node_statistics.decre_count_by_node_info(&node_info.unwrap());
                 }
+                return_value
             }
             SockCommand::Bind => Err(KittyProxyError::Io(std::io::Error::new(
                 std::io::ErrorKind::Unsupported,
@@ -358,8 +385,8 @@ struct SOCKSReq {
 impl SOCKSReq {
     /// Parse a SOCKS Req from a TcpStream
     async fn from_stream<T>(stream: &mut T) -> Result<Self, KittyProxyError>
-    where
-        T: AsyncRead + AsyncWrite + Send + Unpin + 'static,
+        where
+            T: AsyncRead + AsyncWrite + Send + Unpin + 'static,
     {
         // From rfc 1928 (S4), the SOCKS request is formed as follows:
         //
