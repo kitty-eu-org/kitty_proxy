@@ -3,12 +3,14 @@
 // extern crate serde_derive;
 
 use std::collections::HashMap;
+use std::hash::Hash;
 use log::error;
 
 use snafu::Snafu;
 use url::ParseError;
 
 use std::io;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use thiserror::Error;
 use tokio::sync::Mutex;
@@ -64,11 +66,36 @@ impl From<KittyProxyError> for ResponseCode {
 }
 
 
-#[derive(Default)]
-struct NodeStatistics {
-    bytes_sent: u64,
-    bytes_received: u64,
-    connection_count: u64,
+pub struct NodeInfo {
+    socket_addr: SocketAddr,
+    node_number: i8,
 }
 
-type StatisticsMap = Arc<Mutex<HashMap<String, NodeStatistics>>>;
+#[derive(Default)]
+pub struct NodeStatistics {
+    statistics_map: HashMap<NodeInfo, usize>,
+}
+
+impl NodeStatistics {
+    pub fn from_vec(node_infos: &Vec<NodeInfo>) -> Self {
+        let mut statistics_map: HashMap<NodeInfo, usize> = HashMap::with_capacity(node_infos.len());
+        for node_info in &node_infos {
+            statistics_map.insert(node_info, 0);
+        }
+        Self {
+            statistics_map
+        }
+    }
+
+    async fn get_least_connected_node(&self) -> SocketAddr {
+        let new_map: HashMap<SocketAddr, f32> = self.statistics_map
+            .iter()
+            .map(|(&key, value)| (key.socket_addr, value / key.node_number))
+            .collect();
+        let target = new_map.iter().min_by_key(|&(_, &value)| value).map(|(key, _)| key).unwrap().to_owned();
+        target
+    }
+}
+
+
+pub type StatisticsMap = Arc<Mutex<Option<NodeStatistics>>>;
