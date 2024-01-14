@@ -145,6 +145,7 @@ pub struct SocksProxy {
     port: u16,
     timeout: Option<Duration>,
     node_statistics_map: StatisticsMap,
+    is_serve: bool,
 }
 
 impl SocksProxy {
@@ -156,6 +157,7 @@ impl SocksProxy {
             port,
             timeout,
             node_statistics_map: Arc::new(Mutex::new(None)),
+            is_serve: false,
         })
     }
 
@@ -169,6 +171,7 @@ impl SocksProxy {
         let listener = TcpListener::bind((self.ip.clone(), self.port))
             .await
             .unwrap();
+        self.is_serve = true;
         let timeout = self.timeout.clone();
         let match_proxy_clone = Arc::clone(&match_proxy);
         let mut rx_clone = rx.clone();
@@ -213,6 +216,9 @@ impl SocksProxy {
                 } => {}
             }
         });
+    }
+    pub fn is_serving(&self) -> bool {
+        self.is_serve
     }
 }
 

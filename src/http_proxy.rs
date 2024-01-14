@@ -51,6 +51,7 @@ pub struct HttpProxy {
     port: u16,
     timeout: Option<Duration>,
     node_statistics_map: StatisticsMap,
+    is_serve: bool,
 }
 
 impl HttpProxy {
@@ -61,6 +62,7 @@ impl HttpProxy {
             port,
             timeout,
             node_statistics_map: Arc::new(Mutex::new(None)),
+            is_serve: false,
         })
     }
 
@@ -73,6 +75,7 @@ impl HttpProxy {
         let listener = TcpListener::bind((self.ip.clone(), self.port))
             .await
             .unwrap();
+        self.is_serve = true;
         info!("Serving Connections...");
         let timeout = self.timeout.clone();
         let match_proxy_clone = Arc::clone(&match_proxy);
@@ -120,6 +123,10 @@ impl HttpProxy {
                 } => {}
             }
         });
+    }
+
+    pub fn is_serving(&self) -> bool {
+        self.is_serve
     }
 }
 
