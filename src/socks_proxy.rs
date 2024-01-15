@@ -295,7 +295,7 @@ impl<T> SOCKClient<T>
                         .map_err(|_| KittyProxyError::Proxy(ResponseCode::ConnectionRefused))??
                 };
 
-                if match_res {
+                if !match_res {
                     let mut vpn_node_statistics = vpn_node_statistics_map.lock().await;
                     let vpn_node_statistics = vpn_node_statistics.as_mut().unwrap();
                     vpn_node_statistics.incre_count_by_node_info(&node_info.unwrap());
@@ -321,7 +321,7 @@ impl<T> SOCKClient<T>
                     Err(e) => Err(KittyProxyError::Io(e)),
                     Ok((_s_to_t, t_to_s)) => Ok(t_to_s as usize),
                 };
-                if match_res {
+                if !match_res {
                     let mut vpn_node_statistics = vpn_node_statistics_map.lock().await;
                     let vpn_node_statistics = vpn_node_statistics.as_mut().unwrap();
                     vpn_node_statistics.decre_count_by_node_info(&node_info.unwrap());
