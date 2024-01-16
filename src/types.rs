@@ -9,7 +9,7 @@ use snafu::Snafu;
 use url::ParseError;
 
 use std::io;
-use std::net::SocketAddr;
+use std::net::{SocketAddr, IpAddr};
 use std::sync::Arc;
 use thiserror::Error;
 use tokio::sync::Mutex;
@@ -68,6 +68,13 @@ impl From<KittyProxyError> for ResponseCode {
 pub struct NodeInfo {
     pub socket_addr: SocketAddr,
     pub node_number: i8,
+}
+
+
+impl NodeInfo {
+    pub fn new(ip_addr: IpAddr, port: u16, node_number: i8) -> Self {
+        Self { socket_addr: SocketAddr::new(ip_addr, port), node_number }
+        }
 }
 
 #[derive(Default)]
