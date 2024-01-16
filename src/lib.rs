@@ -7,3 +7,4 @@ mod traffic_diversion;
 pub use http_proxy::HttpProxy;
 pub use socks_proxy::SocksProxy;
 pub use traffic_diversion::MatchProxy;
+pub use types::NodeInfo;
