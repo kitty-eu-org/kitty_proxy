@@ -1,21 +1,20 @@
 use crate::v2ray_config::domain::Type;
 use crate::v2ray_config::{Cidr, GeoIpList, GeoSiteList};
 
-use addr::parse_domain_name;
+use addr::{domain, parse_domain_name};
 use anyhow::Result;
-use cidr::{Ipv4Cidr, Ipv6Cidr};
+use cidr::{IpCidr, Ipv4Cidr, Ipv6Cidr};
 use cidr_utils::combiner::{Ipv4CidrCombiner, Ipv6CidrCombiner};
 use prost::Message;
 use regex::Regex;
 use std::collections::HashSet;
+use std::fmt;
 use std::fs::File;
 use std::io::Read;
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::path::PathBuf;
 use std::str::FromStr;
 use url::Host;
-
-use std::fmt;
 
 impl fmt::Display for Cidr {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
@@ -37,6 +36,13 @@ enum SiteIp {
     Ipv6Site(Ipv6Addr),
     DomainSite(String),
     UnknownSite(String),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TrafficStream {
+    Direct,
+    Proxy,
+    Reject,
 }
 
 impl SiteIp {
@@ -64,6 +70,8 @@ pub struct MatchProxy {
     regex_sites: Vec<Regex>,
     ipv4_combainer: Ipv4CidrCombiner,
     ipv6_combainer: Ipv6CidrCombiner,
+    suffix_domain: HashSet<String>,
+    preffix_domain: HashSet<String>,
 }
 
 impl Default for MatchProxy {
@@ -74,6 +82,8 @@ impl Default for MatchProxy {
             regex_sites: Vec::new(),
             ipv4_combainer: Ipv4CidrCombiner::new(),
             ipv6_combainer: Ipv6CidrCombiner::new(),
+            suffix_domain: HashSet::new(),
+            preffix_domain: HashSet::new(),
         }
     }
 }
@@ -160,6 +170,7 @@ impl MatchProxy {
             regex_sites,
             ipv4_combainer: ipv4_combiner,
             ipv6_combainer: ipv6_combiner,
+            ..Default::default()
         };
         Ok(ins)
     }
@@ -191,7 +202,17 @@ impl MatchProxy {
         res
     }
 
-    pub fn match_cn_domain(&self, input_site: &str) -> bool {
+    pub fn traffic_stream_domain(&self, input_site: &str) -> bool {
+        for suffix in &self.suffix_domain {
+            if input_site.ends_with(suffix) {
+                return true;
+            }
+        }
+        for preffix in &self.preffix_domain {
+            if input_site.ends_with(preffix) {
+                return true;
+            }
+        }
         if self.plain_site_set.contains(input_site) {
             return true;
         } else {
@@ -203,21 +224,17 @@ impl MatchProxy {
             }
         }
     }
-    fn is_match_cn(&self, site_or_ip: &str) -> bool {
-        let site_type = SiteIp::from_str(site_or_ip);
-        match site_type {
-            SiteIp::Ipv4Site(site) => self.ipv4_combainer.contains(&site),
-            SiteIp::Ipv6Site(site) => self.ipv6_combainer.contains(&site),
-            SiteIp::DomainSite(site) => self.match_cn_domain(&site),
-            _ => false,
-        }
-    }
 
-    pub fn traffic_stream(&self, host: &Host) -> bool {
-        match host {
+    pub fn traffic_stream(&self, host: &Host) -> TrafficStream {
+        let traffic_stream_res = match host {
             Host::Ipv4(host) => self.ipv4_combainer.contains(&host),
             Host::Ipv6(host) => self.ipv6_combainer.contains(&host),
-            Host::Domain(host) => self.match_cn_domain(&host),
+            Host::Domain(host) => self.traffic_stream_domain(&host),
+        };
+        if traffic_stream_res {
+            TrafficStream::Direct
+        } else {
+            TrafficStream::Proxy
         }
     }
 
@@ -233,6 +250,32 @@ impl MatchProxy {
             | ((octets[2] as u32) << 8)
             | (octets[3] as u32)
     }
+
+    pub fn add_direct_cidr(&mut self, cidr: IpCidr) {
+        match cidr {
+            IpCidr::V4(cidr) => self.ipv4_combainer.push(cidr),
+            IpCidr::V6(cidr) => self.ipv6_combainer.push(cidr),
+        }
+    }
+
+    pub fn add_direct_root_domain(&mut self, domain_root: String) {
+        self.domain_set.insert(domain_root);
+    }
+
+    pub fn add_direct_domain_suffix(&mut self, suffix: String) {
+        self.suffix_domain.insert(suffix);
+    }
+    pub fn add_direct_domain_preffix(&mut self, preffix: String) {
+        self.preffix_domain.insert(preffix);
+    }
+
+    pub fn is_direct(&self, host: &Host) -> bool {
+        let traffic_res = self.traffic_stream(host);
+        match traffic_res {
+            TrafficStream::Direct => true,
+            _ => false,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -246,23 +289,29 @@ mod tests {
     fn it_works() -> Result<()> {
         let geoip_file = "/home/hezhaozhao/opensource/kitty/src-tauri/binaries/geoip.dat";
         let geosite_file = "/home/hezhaozhao/opensource/kitty/src-tauri/binaries/geosite.dat";
-        let ins = MatchProxy::from_geo_dat(
+        let mut ins = MatchProxy::from_geo_dat(
             Some(&PathBuf::from_str(geoip_file).unwrap()),
             Some(&PathBuf::from_str(geosite_file).unwrap()),
         )
         .unwrap();
-        let res = ins.match_cn_domain("www.baidu.com");
-        assert_eq!(res, true);
 
-        let res = ins.match_cn_domain("openai.com");
-        assert_eq!(res, false);
         let host = Url::parse("http://www.google.com")?
             .host()
             .map(|x| x.to_owned())
             .unwrap();
         println!("host: {:?}", host);
         let res3 = ins.traffic_stream(&host);
-        assert_eq!(res3, false);
+        assert_eq!(res3, TrafficStream::Proxy);
+        let ipcidr = IpCidr::from_str("192.168.0.0/24");
+        println!("ipcidr: {:?}", ipcidr);
+        ins.add_direct_cidr(ipcidr.unwrap());
+        let host = Url::parse("http://192.168.0.128:8000")?
+            .host()
+            .map(|x| x.to_owned())
+            .unwrap();
+        let res4 = ins.traffic_stream(&host);
+        assert_eq!(res4, TrafficStream::Direct);
+
         Ok(())
     }
 }

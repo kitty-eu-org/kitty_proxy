@@ -164,15 +164,15 @@ where
             Duration::from_millis(500)
         };
 
-        let match_res = match_proxy.traffic_stream(&req.host);
-        let node_info = if !match_res {
+        let is_direct = match_proxy.is_direct(&req.host);
+        let node_info = if !is_direct {
             let vpn_node_statistics = vpn_node_statistics_map.lock().await;
             let vpn_node_statistics_ref = vpn_node_statistics.as_ref().unwrap();
             Some(vpn_node_statistics_ref.get_least_connected_node().await)
         } else {
             None
         };
-        let target_server = if match_res {
+        let target_server = if is_direct {
             trace!("direct connect");
             format!("{}:{}", req.host, req.port)
         } else {
@@ -187,13 +187,13 @@ where
             )
             .await
             .map_err(|_| KittyProxyError::Proxy(ResponseCode::ConnectionRefused))??;
-        if !match_res {
+        if !is_direct {
             let mut vpn_node_statistics = vpn_node_statistics_map.lock().await;
             let vpn_node_statistics = vpn_node_statistics.as_mut().unwrap();
             vpn_node_statistics.incre_count_by_node_info(&node_info.unwrap());
         }
 
-        if req.method == "CONNECT" && match_res {
+        if req.method == "CONNECT" && is_direct {
             self.stream
                 .write_all(format!("{} 200 Connection established\r\n\r\n", req.version).as_bytes())
                 .await?;
@@ -212,7 +212,7 @@ where
                 Err(e) => Err(KittyProxyError::Io(e)),
                 Ok((_s_to_t, t_to_s)) => Ok(t_to_s as usize),
             };
-        if !match_res {
+        if !is_direct {
             let mut vpn_node_statistics = vpn_node_statistics_map.lock().await;
             let vpn_node_statistics = vpn_node_statistics.as_mut().unwrap();
             vpn_node_statistics.decre_count_by_node_info(&node_info.unwrap());
