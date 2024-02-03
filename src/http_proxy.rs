@@ -38,8 +38,8 @@ impl HttpReply {
     }
 
     pub async fn send<T>(&self, stream: &mut T) -> io::Result<()>
-        where
-            T: AsyncRead + AsyncWrite + Send + Unpin + 'static,
+    where
+        T: AsyncRead + AsyncWrite + Send + Unpin + 'static,
     {
         stream.write_all(&self.buf[..]).await?;
         Ok(())
@@ -136,8 +136,8 @@ pub struct HttpClient<T: AsyncRead + AsyncWrite + Send + Unpin + 'static> {
 }
 
 impl<T> HttpClient<T>
-    where
-        T: AsyncRead + AsyncWrite + Send + Unpin + 'static,
+where
+    T: AsyncRead + AsyncWrite + Send + Unpin + 'static,
 {
     /// Create a new SOCKClient
     pub fn new(stream: T, timeout: Option<Duration>) -> Self {
@@ -185,8 +185,8 @@ impl<T> HttpClient<T>
                 time_out,
                 async move { TcpStream::connect(target_server).await },
             )
-                .await
-                .map_err(|_| KittyProxyError::Proxy(ResponseCode::ConnectionRefused))??;
+            .await
+            .map_err(|_| KittyProxyError::Proxy(ResponseCode::ConnectionRefused))??;
         if !match_res {
             let mut vpn_node_statistics = vpn_node_statistics_map.lock().await;
             let vpn_node_statistics = vpn_node_statistics.as_mut().unwrap();
@@ -195,7 +195,7 @@ impl<T> HttpClient<T>
 
         if req.method == "CONNECT" && match_res {
             self.stream
-                .write_all(b"HTTP/1.1 200 Connection established\r\n\r\n")
+                .write_all(format!("{} 200 Connection established\r\n\r\n", req.version).as_bytes())
                 .await?;
         } else {
             target_stream.write_all(&req.readed_buffer).await?;
@@ -228,13 +228,14 @@ struct HttpReq {
     pub host: Host,
     pub port: u16,
     pub readed_buffer: Vec<u8>,
+    pub version: String,
 }
 
 impl HttpReq {
     /// Parse a SOCKS Req from a TcpStream
     async fn from_stream<T>(stream: &mut T) -> Result<Self, KittyProxyError>
-        where
-            T: AsyncRead + AsyncWrite + Send + Unpin + 'static,
+    where
+        T: AsyncRead + AsyncWrite + Send + Unpin + 'static,
     {
         let mut request_headers: Vec<String> = Vec::new();
         let mut reader: BufReader<&mut T> = BufReader::new(stream);
@@ -254,7 +255,7 @@ impl HttpReq {
         let version = parts.next().expect("Invalid request");
         trace!("http req path:{origin_path}, method:{method}, version:{version}");
 
-        if version != "HTTP/1.1" {
+        if version != "HTTP/1.1" || version != "HTTP/1.0" {
             warn!("Init: Unsupported version: HTTP{}", version);
             stream.shutdown().await?;
             return Err(anyhow!(format!("Not support version: {}.", version)).into());
@@ -274,6 +275,7 @@ impl HttpReq {
             host,
             port,
             readed_buffer: request_headers.join("").as_bytes().to_vec(),
+            version: version.into(),
         })
     }
 }
