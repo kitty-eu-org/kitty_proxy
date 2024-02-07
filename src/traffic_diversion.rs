@@ -1,7 +1,7 @@
 use crate::v2ray_config::domain::Type;
 use crate::v2ray_config::{Cidr, GeoIpList, GeoSiteList};
 
-use addr::{domain, parse_domain_name};
+use addr::parse_domain_name;
 use anyhow::Result;
 use cidr::{IpCidr, Ipv4Cidr, Ipv6Cidr};
 use cidr_utils::combiner::{Ipv4CidrCombiner, Ipv6CidrCombiner};
@@ -251,15 +251,21 @@ impl MatchProxy {
             | (octets[3] as u32)
     }
 
-    pub fn add_direct_cidr(&mut self, cidr: IpCidr) {
-        match cidr {
+    pub fn add_direct_cidr(&mut self, cidr: &str) -> Result<()> {
+        let ip_cidr = IpCidr::from_str(cidr)?;
+        match ip_cidr {
             IpCidr::V4(cidr) => self.ipv4_combainer.push(cidr),
             IpCidr::V6(cidr) => self.ipv6_combainer.push(cidr),
         }
+        Ok(())
     }
 
     pub fn add_direct_root_domain(&mut self, domain_root: String) {
         self.domain_set.insert(domain_root);
+    }
+
+    pub fn add_fulle_domain(&mut self, domain_root: String) {
+        self.plain_site_set.insert(domain_root);
     }
 
     pub fn add_direct_domain_suffix(&mut self, suffix: String) {
@@ -302,9 +308,7 @@ mod tests {
         println!("host: {:?}", host);
         let res3 = ins.traffic_stream(&host);
         assert_eq!(res3, TrafficStream::Proxy);
-        let ipcidr = IpCidr::from_str("192.168.0.0/24");
-        println!("ipcidr: {:?}", ipcidr);
-        ins.add_direct_cidr(ipcidr.unwrap());
+        ins.add_direct_cidr("192.168.0.0/24").unwrap();
         let host = Url::parse("http://192.168.0.128:8000")?
             .host()
             .map(|x| x.to_owned())

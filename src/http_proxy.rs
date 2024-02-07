@@ -255,8 +255,8 @@ impl HttpReq {
         let version = parts.next().expect("Invalid request");
         trace!("http req path:{origin_path}, method:{method}, version:{version}");
 
-        if version != "HTTP/1.1" || version != "HTTP/1.0" {
-            warn!("Init: Unsupported version: HTTP{}", version);
+        if version != "HTTP/1.1" && version != "HTTP/1.0" {
+            warn!("Init: Unsupported version: {}", version);
             stream.shutdown().await?;
             return Err(anyhow!(format!("Not support version: {}.", version)).into());
         }
