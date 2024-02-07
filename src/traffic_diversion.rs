@@ -316,6 +316,13 @@ mod tests {
         let res4 = ins.traffic_stream(&host);
         assert_eq!(res4, TrafficStream::Direct);
 
+        let host = Url::parse("http://sc.136156.com/baidu.html")?
+            .host()
+            .map(|x| x.to_owned())
+            .unwrap();
+        println!("host: {:?}", host);
+        let res3 = ins.traffic_stream(&host);
+        assert_eq!(res3, TrafficStream::Proxy);
         Ok(())
     }
 }

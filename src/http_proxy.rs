@@ -11,6 +11,7 @@ use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::watch::Receiver;
 use tokio::sync::Mutex;
+use tokio::sync::RwLock;
 use tokio::time::timeout;
 use url::{Host, ParseError, Url};
 
@@ -68,7 +69,7 @@ impl HttpProxy {
 
     pub async fn serve(
         &mut self,
-        match_proxy: Arc<MatchProxy>,
+        match_proxy: Arc<RwLock<MatchProxy>>,
         rx: &mut Receiver<bool>,
         vpn_node_infos: Vec<NodeInfo>,
     ) {
@@ -94,7 +95,7 @@ impl HttpProxy {
                         tokio::spawn(async move {
                             let mut client = HttpClient::new(stream, timeout);
                 match client
-                    .handle_client(match_proxy_clone.as_ref(), statistics_map_clone)
+                    .handle_client(match_proxy_clone, statistics_map_clone)
                     .await
                 {
                     Ok(_) => {}
@@ -153,7 +154,7 @@ where
     /// Handles a client
     pub async fn handle_client(
         &mut self,
-        match_proxy: &MatchProxy,
+        match_proxy_share: Arc<RwLock<MatchProxy>>,
         vpn_node_statistics_map: StatisticsMap,
     ) -> Result<usize, KittyProxyError> {
         debug!("Starting to relay data");
@@ -163,7 +164,7 @@ where
         } else {
             Duration::from_millis(500)
         };
-
+        let match_proxy = match_proxy_share.read().await;
         let is_direct = match_proxy.is_direct(&req.host);
         let node_info = if !is_direct {
             let vpn_node_statistics = vpn_node_statistics_map.lock().await;
