@@ -7,7 +7,7 @@ use cidr::{IpCidr, Ipv4Cidr, Ipv6Cidr};
 use cidr_utils::combiner::{Ipv4CidrCombiner, Ipv6CidrCombiner};
 use prost::Message;
 use regex::Regex;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::fs::File;
 use std::io::Read;
@@ -15,6 +15,7 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 use std::path::PathBuf;
 use std::str::FromStr;
 use url::Host;
+
 
 impl fmt::Display for Cidr {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
@@ -65,25 +66,25 @@ impl SiteIp {
 }
 
 pub struct MatchProxy {
-    plain_site_set: HashSet<String>,
-    domain_set: HashSet<String>,
-    regex_sites: Vec<Regex>,
-    ipv4_combainer: Ipv4CidrCombiner,
-    ipv6_combainer: Ipv6CidrCombiner,
-    suffix_domain: HashSet<String>,
-    preffix_domain: HashSet<String>,
+    plain_site_map: HashMap<String, TrafficStream>,
+    root_domain_map: HashMap<String, TrafficStream>,
+    direct_regex_sites: Vec<Regex>,
+    direct_ipv4_combainer: Ipv4CidrCombiner,
+    direct_ipv6_combainer: Ipv6CidrCombiner,
+    suffix_domain_map: HashMap<String, TrafficStream>,
+    preffix_domain_map: HashMap<String, TrafficStream>,
 }
 
 impl Default for MatchProxy {
     fn default() -> Self {
         Self {
-            plain_site_set: HashSet::new(),
-            domain_set: HashSet::new(),
-            regex_sites: Vec::new(),
-            ipv4_combainer: Ipv4CidrCombiner::new(),
-            ipv6_combainer: Ipv6CidrCombiner::new(),
-            suffix_domain: HashSet::new(),
-            preffix_domain: HashSet::new(),
+            plain_site_map: HashMap::new(),
+            root_domain_map: HashMap::new(),
+            direct_regex_sites: Vec::new(),
+            direct_ipv4_combainer: Ipv4CidrCombiner::new(),
+            direct_ipv6_combainer: Ipv6CidrCombiner::new(),
+            suffix_domain_map: HashMap::new(),
+            preffix_domain_map: HashMap::new(),
         }
     }
 }
@@ -104,6 +105,7 @@ impl MatchProxy {
         gepip_file: Option<&PathBuf>,
         geo_site_file: Option<&PathBuf>,
     ) -> Result<Self> {
+
         let mut ipv4_combiner = Ipv4CidrCombiner::new();
         let mut ipv6_combiner = Ipv6CidrCombiner::new();
         if let Some(gepip_file) = gepip_file {
@@ -128,10 +130,9 @@ impl MatchProxy {
             }
         } else {
         }
-        let mut plain_site_set: HashSet<String> = HashSet::new();
-        let mut regex_sites: Vec<Regex> = Vec::new();
-        let mut domain_set: HashSet<String> = HashSet::new();
-
+        let mut plain_site_map: HashMap<String, TrafficStream> = HashMap::new();
+        let mut direct_regex_sites: Vec<Regex> = Vec::new();
+        let mut root_domain_map: HashMap<String, TrafficStream> = HashMap::new();
         let geo_sites = read_geosite_from_dat(geo_site_file).entry;
         for geo_site in geo_sites {
             let geo_site_clone = geo_site.clone();
@@ -140,9 +141,9 @@ impl MatchProxy {
                     let site_type = domain.r#type();
                     match site_type {
                         Type::Plain => {
-                            plain_site_set.insert(domain.value);
+                            plain_site_map.insert(domain.value, TrafficStream::Proxy);
                         }
-                        Type::Regex => regex_sites.push(Regex::new(&domain.value.as_str())?),
+                        Type::Regex => direct_regex_sites.push(Regex::new(&domain.value.as_str())?),
                         Type::Domain => {
                             let domain = parse_domain_name(domain.value.as_str());
                             let domain_root = match domain {
@@ -153,11 +154,12 @@ impl MatchProxy {
                                 Err(_) => "",
                             };
                             if domain_root.len() > 0 {
-                                domain_set.insert(domain_root.to_string());
+                                root_domain_map
+                                    .insert(domain_root.to_string(), TrafficStream::Direct);
                             }
                         }
                         Type::Full => {
-                            plain_site_set.insert(domain.value);
+                            root_domain_map.insert(domain.value, TrafficStream::Direct);
                         }
                     }
                 }
@@ -167,18 +169,18 @@ impl MatchProxy {
 
         // Ok(())
         let ins = Self {
-            plain_site_set,
-            domain_set,
-            regex_sites,
-            ipv4_combainer: ipv4_combiner,
-            ipv6_combainer: ipv6_combiner,
+            plain_site_map,
+            root_domain_map,
+            direct_regex_sites,
+            direct_ipv4_combainer: ipv4_combiner,
+            direct_ipv6_combainer: ipv6_combiner,
             ..Default::default()
         };
         Ok(ins)
     }
 
     fn regex_match_cn(&self, input_site: &str) -> bool {
-        for regex in &self.regex_sites {
+        for regex in &self.direct_regex_sites {
             let is_match = regex.is_match(input_site);
             if is_match {
                 return is_match;
