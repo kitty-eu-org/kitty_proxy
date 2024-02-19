@@ -152,7 +152,9 @@ impl MatchProxy {
                                 },
                                 Err(_) => "",
                             };
-                            domain_set.insert(domain_root.to_string());
+                            if domain_root.len() > 0 {
+                                domain_set.insert(domain_root.to_string());
+                            }
                         }
                         Type::Full => {
                             plain_site_set.insert(domain.value);
@@ -214,11 +216,11 @@ impl MatchProxy {
             }
         }
         if self.plain_site_set.contains(input_site) {
-            return true;
+            true
         } else {
             let match_res = self.domain_match_cn(input_site);
             if match_res {
-                return true;
+                true
             } else {
                 self.regex_match_cn(input_site)
             }
@@ -260,12 +262,22 @@ impl MatchProxy {
         Ok(())
     }
 
-    pub fn add_direct_root_domain(&mut self, domain_root: String) {
-        self.domain_set.insert(domain_root);
+    pub fn add_direct_root_domain(&mut self, domain: String) {
+        let domain = parse_domain_name(domain.as_str());
+        let domain_root = match domain {
+            Ok(root_domain) => match root_domain.root() {
+                Some(domain) => domain,
+                None => "",
+            },
+            Err(_) => "",
+        };
+        if domain_root.len() > 0 {
+            self.domain_set.insert(domain_root.to_string());
+        }
     }
 
-    pub fn add_fulle_domain(&mut self, domain_root: String) {
-        self.plain_site_set.insert(domain_root);
+    pub fn add_direct_full_domain(&mut self, domain: String) {
+        self.plain_site_set.insert(domain);
     }
 
     pub fn add_direct_domain_suffix(&mut self, suffix: String) {
