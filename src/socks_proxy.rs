@@ -267,7 +267,7 @@ where
                 };
                 let match_proxy = match_proxy_share.read().await;
                 let is_direct = match_proxy.is_direct(&req.host);
-
+                drop(match_proxy);
                 let node_info = if !is_direct {
                     let vpn_node_statistics = vpn_node_statistics_map.lock().await;
                     let vpn_node_statistics_ref = vpn_node_statistics.as_ref().unwrap();
