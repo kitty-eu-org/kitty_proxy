@@ -15,6 +15,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Mutex;
 use tokio::time::timeout;
 
+use crate::traffic_diversion::TrafficStreamRule;
 use crate::types::{KittyProxyError, NodeInfo, NodeStatistics, ResponseCode, StatisticsMap};
 use crate::MatchProxy;
 
@@ -266,8 +267,17 @@ where
                     Duration::from_millis(500)
                 };
                 let match_proxy = match_proxy_share.read().await;
-                let is_direct = match_proxy.is_direct(&req.host);
+                let rule = match_proxy.traffic_stream(&req.host);
                 drop(match_proxy);
+
+                let is_direct = match rule {
+                    TrafficStreamRule::Reject => {
+                        self.shutdown().await?;
+                        return Ok(0 as usize);
+                    }
+                    TrafficStreamRule::Direct => true,
+                    TrafficStreamRule::Proxy => false,
+                };
                 let node_info = if !is_direct {
                     let vpn_node_statistics = vpn_node_statistics_map.lock().await;
                     let vpn_node_statistics_ref = vpn_node_statistics.as_ref().unwrap();
