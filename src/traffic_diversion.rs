@@ -5,6 +5,7 @@ use addr::parse_domain_name;
 use anyhow::Result;
 use cidr::{IpCidr, Ipv4Cidr, Ipv6Cidr};
 use cidr_utils::combiner::{Ipv4CidrCombiner, Ipv6CidrCombiner};
+use prefix_tree::PrefixMap;
 use prost::Message;
 use regex::Regex;
 use std::collections::{HashMap, HashSet};
@@ -15,7 +16,6 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 use std::path::PathBuf;
 use std::str::FromStr;
 use url::Host;
-
 
 impl fmt::Display for Cidr {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
@@ -40,7 +40,7 @@ enum SiteIp {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum TrafficStream {
+pub enum TrafficStreamRule {
     Direct,
     Proxy,
     Reject,
@@ -66,13 +66,17 @@ impl SiteIp {
 }
 
 pub struct MatchProxy {
-    plain_site_map: HashMap<String, TrafficStream>,
-    root_domain_map: HashMap<String, TrafficStream>,
+    plain_site_map: HashMap<String, TrafficStreamRule>,
+    root_domain_map: HashMap<String, TrafficStreamRule>,
     direct_regex_sites: Vec<Regex>,
     direct_ipv4_combainer: Ipv4CidrCombiner,
     direct_ipv6_combainer: Ipv6CidrCombiner,
-    suffix_domain_map: HashMap<String, TrafficStream>,
-    preffix_domain_map: HashMap<String, TrafficStream>,
+    proxy_ipv4_combainer: Ipv4CidrCombiner,
+    proxy_ipv6_combainer: Ipv6CidrCombiner,
+    reject_ipv4_combainer: Ipv4CidrCombiner,
+    reject_ipv6_combainer: Ipv6CidrCombiner,
+    suffix_domain_map: PrefixMap<u8, TrafficStreamRule>,
+    preffix_domain_map: PrefixMap<u8, TrafficStreamRule>,
 }
 
 impl Default for MatchProxy {
@@ -83,8 +87,12 @@ impl Default for MatchProxy {
             direct_regex_sites: Vec::new(),
             direct_ipv4_combainer: Ipv4CidrCombiner::new(),
             direct_ipv6_combainer: Ipv6CidrCombiner::new(),
-            suffix_domain_map: HashMap::new(),
-            preffix_domain_map: HashMap::new(),
+            proxy_ipv4_combainer: Ipv4CidrCombiner::new(),
+            proxy_ipv6_combainer: Ipv6CidrCombiner::new(),
+            reject_ipv4_combainer: Ipv4CidrCombiner::new(),
+            reject_ipv6_combainer: Ipv6CidrCombiner::new(),
+            suffix_domain_map: PrefixMap::new(),
+            preffix_domain_map: PrefixMap::new(),
         }
     }
 }
@@ -105,7 +113,6 @@ impl MatchProxy {
         gepip_file: Option<&PathBuf>,
         geo_site_file: Option<&PathBuf>,
     ) -> Result<Self> {
-
         let mut ipv4_combiner = Ipv4CidrCombiner::new();
         let mut ipv6_combiner = Ipv6CidrCombiner::new();
         if let Some(gepip_file) = gepip_file {
@@ -130,9 +137,9 @@ impl MatchProxy {
             }
         } else {
         }
-        let mut plain_site_map: HashMap<String, TrafficStream> = HashMap::new();
+        let mut plain_site_map: HashMap<String, TrafficStreamRule> = HashMap::new();
         let mut direct_regex_sites: Vec<Regex> = Vec::new();
-        let mut root_domain_map: HashMap<String, TrafficStream> = HashMap::new();
+        let mut root_domain_map: HashMap<String, TrafficStreamRule> = HashMap::new();
         let geo_sites = read_geosite_from_dat(geo_site_file).entry;
         for geo_site in geo_sites {
             let geo_site_clone = geo_site.clone();
@@ -141,7 +148,7 @@ impl MatchProxy {
                     let site_type = domain.r#type();
                     match site_type {
                         Type::Plain => {
-                            plain_site_map.insert(domain.value, TrafficStream::Proxy);
+                            plain_site_map.insert(domain.value, TrafficStreamRule::Proxy);
                         }
                         Type::Regex => direct_regex_sites.push(Regex::new(&domain.value.as_str())?),
                         Type::Domain => {
@@ -155,11 +162,11 @@ impl MatchProxy {
                             };
                             if domain_root.len() > 0 {
                                 root_domain_map
-                                    .insert(domain_root.to_string(), TrafficStream::Direct);
+                                    .insert(domain_root.to_string(), TrafficStreamRule::Direct);
                             }
                         }
                         Type::Full => {
-                            root_domain_map.insert(domain.value, TrafficStream::Direct);
+                            root_domain_map.insert(domain.value, TrafficStreamRule::Direct);
                         }
                     }
                 }
@@ -189,57 +196,68 @@ impl MatchProxy {
         return false;
     }
 
-    fn domain_match_cn(&self, input_site: &str) -> bool {
+    fn domain_match_cn(&self, input_site: &str) -> Option<&TrafficStreamRule> {
         let domain: std::prelude::v1::Result<addr::domain::Name<'_>, addr::error::Error<'_>> =
             parse_domain_name(input_site);
         let res = match domain {
             Ok(name) => {
-                let res = if let Some(domain_root) = name.root() {
-                    self.domain_set.contains(domain_root)
+                let res: Option<&TrafficStreamRule> = if let Some(domain_root) = name.root() {
+                    self.root_domain_map.get(domain_root)
                 } else {
-                    false
+                    None
                 };
                 res
             }
-            Err(_) => false,
+            Err(_) => None,
         };
         res
     }
 
-    pub fn traffic_stream_domain(&self, input_site: &str) -> bool {
-        for suffix in &self.suffix_domain {
-            if input_site.ends_with(suffix) {
-                return true;
-            }
+    pub fn traffic_stream_domain(&self, input_site: &str) -> TrafficStreamRule {
+        let res = self.preffix_domain_map.get(input_site);
+        if let Some(res) = res {
+            return res.to_owned();
         }
-        for preffix in &self.preffix_domain {
-            if input_site.ends_with(preffix) {
-                return true;
-            }
+        let res = self
+            .preffix_domain_map
+            .get(input_site.chars().rev().collect::<String>());
+        if let Some(res) = res {
+            return res.to_owned();
         }
-        if self.plain_site_set.contains(input_site) {
-            true
+        let res = self.plain_site_map.get(input_site);
+        if let Some(res) = res {
+            return res.to_owned();
+        }
+        let match_res = self.domain_match_cn(input_site);
+        if let Some(res) = match_res {
+            return res.to_owned();
+        }
+        if self.regex_match_cn(input_site) {
+            TrafficStreamRule::Direct
         } else {
-            let match_res = self.domain_match_cn(input_site);
-            if match_res {
-                true
-            } else {
-                self.regex_match_cn(input_site)
-            }
+            TrafficStreamRule::Proxy
         }
     }
 
-    pub fn traffic_stream(&self, host: &Host) -> TrafficStream {
+    pub fn traffic_stream(&self, host: &Host) -> TrafficStreamRule {
         let traffic_stream_res = match host {
-            Host::Ipv4(host) => self.ipv4_combainer.contains(&host),
-            Host::Ipv6(host) => self.ipv6_combainer.contains(&host),
+            Host::Ipv4(host) => {
+                if self.direct_ipv4_combainer.contains(&host) {
+                    TrafficStreamRule::Direct
+                } else {
+                    TrafficStreamRule::Proxy
+                }
+            }
+            Host::Ipv6(host) => {
+                if self.direct_ipv6_combainer.contains(&host) {
+                    TrafficStreamRule::Direct
+                } else {
+                    TrafficStreamRule::Proxy
+                }
+            }
             Host::Domain(host) => self.traffic_stream_domain(&host),
         };
-        if traffic_stream_res {
-            TrafficStream::Direct
-        } else {
-            TrafficStream::Proxy
-        }
+        traffic_stream_res
     }
 
     fn ip_to_number(ip: Ipv4Addr) -> u32 {
@@ -255,17 +273,29 @@ impl MatchProxy {
             | (octets[3] as u32)
     }
 
-    pub fn add_direct_cidr(&mut self, cidr: &str) -> Result<()> {
+    pub fn add_cidr(&mut self, cidr: &str, rule: TrafficStreamRule) -> Result<()> {
         let ip_cidr = IpCidr::from_str(cidr)?;
         match ip_cidr {
-            IpCidr::V4(cidr) => self.ipv4_combainer.push(cidr),
-            IpCidr::V6(cidr) => self.ipv6_combainer.push(cidr),
+            IpCidr::V4(cidr) => {
+                match rule {
+                    TrafficStreamRule::Direct => self.direct_ipv4_combainer.push(cidr),
+                    TrafficStreamRule::Proxy => self.proxy_ipv4_combainer.push(cidr),
+                    TrafficStreamRule::Reject => self.reject_ipv4_combainer.push(cidr),
+                }
+            },
+            IpCidr::V6(cidr) =>  {
+                match rule {
+                    TrafficStreamRule::Direct => self.direct_ipv6_combainer.push(cidr),
+                    TrafficStreamRule::Proxy => self.proxy_ipv6_combainer.push(cidr),
+                    TrafficStreamRule::Reject => self.reject_ipv6_combainer.push(cidr),
+                }
+            }
         }
         Ok(())
     }
 
-    pub fn add_direct_root_domain(&mut self, domain: String) {
-        let domain = parse_domain_name(domain.as_str());
+    pub fn add_root_domain(&mut self, domain: &str, rule: TrafficStreamRule) {
+        let domain = parse_domain_name(domain);
         let domain_root = match domain {
             Ok(root_domain) => match root_domain.root() {
                 Some(domain) => domain,
@@ -274,25 +304,28 @@ impl MatchProxy {
             Err(_) => "",
         };
         if domain_root.len() > 0 {
-            self.domain_set.insert(domain_root.to_string());
+            self.root_domain_map
+                .insert(domain_root.to_string(), rule);
         }
     }
 
-    pub fn add_direct_full_domain(&mut self, domain: String) {
-        self.plain_site_set.insert(domain);
+    pub fn add_full_domain(&mut self, domain: String, rule: TrafficStreamRule) {
+        self.plain_site_map.insert(domain, rule);
     }
 
-    pub fn add_direct_domain_suffix(&mut self, suffix: String) {
-        self.suffix_domain.insert(suffix);
+    pub fn add_domain_suffix(&mut self, suffix: &str, rule: TrafficStreamRule) {
+        let suffix_rev = suffix.chars().rev().collect::<String>();
+        self.suffix_domain_map.insert(suffix_rev, rule);
     }
-    pub fn add_direct_domain_preffix(&mut self, preffix: String) {
-        self.preffix_domain.insert(preffix);
+    pub fn add_domain_preffix(&mut self, preffix: String, rule: TrafficStreamRule) {
+        self.preffix_domain_map
+            .insert(preffix, rule);
     }
 
     pub fn is_direct(&self, host: &Host) -> bool {
         let traffic_res = self.traffic_stream(host);
         match traffic_res {
-            TrafficStream::Direct => true,
+            TrafficStreamRule::Direct => true,
             _ => false,
         }
     }
@@ -307,8 +340,8 @@ mod tests {
 
     #[test]
     fn it_works() -> Result<()> {
-        let geoip_file = "/home/hezhaozhao/opensource/kitty/src-tauri/binaries/geoip.dat";
-        let geosite_file = "/home/hezhaozhao/opensource/kitty/src-tauri/binaries/geosite.dat";
+        let geoip_file = "/Users/hezhaozhao/myself/kitty/src-tauri/static/kitty_geoip.dat";
+        let geosite_file = "/Users/hezhaozhao/myself/kitty/src-tauri/static/kitty_geosite.dat";
         let mut ins = MatchProxy::from_geo_dat(
             Some(&PathBuf::from_str(geoip_file).unwrap()),
             Some(&PathBuf::from_str(geosite_file).unwrap()),
@@ -321,14 +354,14 @@ mod tests {
             .unwrap();
         println!("host: {:?}", host);
         let res3 = ins.traffic_stream(&host);
-        assert_eq!(res3, TrafficStream::Proxy);
-        ins.add_direct_cidr("192.168.0.0/24").unwrap();
+        assert_eq!(res3, TrafficStreamRule::Proxy);
+        ins.add_cidr("192.168.0.0/24", TrafficStreamRule::Direct).unwrap();
         let host = Url::parse("http://192.168.0.128:8000")?
             .host()
             .map(|x| x.to_owned())
             .unwrap();
         let res4 = ins.traffic_stream(&host);
-        assert_eq!(res4, TrafficStream::Direct);
+        assert_eq!(res4, TrafficStreamRule::Direct);
 
         let host = Url::parse("http://sc.136156.com/baidu.html")?
             .host()
@@ -336,7 +369,7 @@ mod tests {
             .unwrap();
         println!("host: {:?}", host);
         let res3 = ins.traffic_stream(&host);
-        assert_eq!(res3, TrafficStream::Proxy);
+        assert_eq!(res3, TrafficStreamRule::Proxy);
         Ok(())
     }
 }
