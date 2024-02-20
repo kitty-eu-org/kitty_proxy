@@ -1,6 +1,5 @@
 use anyhow::{anyhow, Result};
 use log::{debug, error, info, trace, warn};
-use regex::Match;
 use tokio::sync::watch::Receiver;
 use url::Host;
 

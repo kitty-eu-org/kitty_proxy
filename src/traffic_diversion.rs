@@ -8,7 +8,7 @@ use cidr_utils::combiner::{Ipv4CidrCombiner, Ipv6CidrCombiner};
 use prefix_tree::PrefixMap;
 use prost::Message;
 use regex::Regex;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fmt;
 use std::fs::File;
 use std::io::Read;
