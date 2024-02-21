@@ -366,6 +366,20 @@ impl MatchProxy {
     pub fn delete_full_domain(&mut self, domain: &str) {
         self.plain_site_map.remove(domain);
     }
+
+    pub fn delete_root_domain(&mut self, domain: &str) {
+        let domain = parse_domain_name(domain);
+        let domain_root = match domain {
+            Ok(root_domain) => match root_domain.root() {
+                Some(domain) => domain,
+                None => "",
+            },
+            Err(_) => "",
+        };
+        if domain_root.len() > 0 {
+            self.root_domain_map.remove(domain_root);
+        }
+    }
 }
 
 #[cfg(test)]
