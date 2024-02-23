@@ -154,7 +154,7 @@ pub struct SocksProxy {
 impl SocksProxy {
     /// Create a new Merino instance
     pub async fn new(ip: &str, port: u16, timeout: Option<Duration>) -> io::Result<Self> {
-        info!("Listening on {}:{}", ip, port);
+        info!("Socks5 proxy listening on {}:{}", ip, port);
         Ok(Self {
             ip: ip.to_string(),
             port,
@@ -170,7 +170,6 @@ impl SocksProxy {
         rx: &mut Receiver<bool>,
         vpn_node_infos: Vec<NodeInfo>,
     ) {
-        info!("Serving Connections...");
         let listener = TcpListener::bind((self.ip.clone(), self.port))
             .await
             .unwrap();
@@ -187,7 +186,6 @@ impl SocksProxy {
             tokio::select! {
                 _ = async {
                     loop {
-                        println!("loop");
                         let (stream, client_addr) = listener.accept().await.unwrap();
                         let match_proxy_clone = match_proxy_clone.clone();
                         let statistics_map_clone = statistics_map_clone.clone();
@@ -214,7 +212,6 @@ impl SocksProxy {
                 } => {}
                 _ =  async {
                         if rx_clone.changed().await.is_ok() {
-                            println!("exit");
                             return//该任务退出，别的也会停
                     }
                 } => {}
@@ -258,8 +255,6 @@ where
         match req.command {
             // Use the Proxy to connect to the specified addr/port
             SockCommand::Connect => {
-                debug!("Handling CONNECT Command");
-
                 let time_out = if let Some(time_out) = self.timeout {
                     time_out
                 } else {
@@ -268,7 +263,7 @@ where
                 let match_proxy = match_proxy_share.read().await;
                 let rule = match_proxy.traffic_stream(&req.host);
                 drop(match_proxy);
-
+                info!("Socks5 [TCP] {}:{} {} connect", req.host, req.port, rule);
                 let is_direct = match rule {
                     TrafficStreamRule::Reject => {
                         self.shutdown().await?;
@@ -285,14 +280,11 @@ where
                     None
                 };
                 let target_server = if is_direct {
-                    trace!("direct connect");
                     format!("{}:{}", req.host, req.port)
                 } else {
-                    trace!("proxy connect");
                     node_info.unwrap().socket_addr.to_string()
                 };
-                trace!("req.target_server: {}", target_server);
-
+                debug!("req.target_server: {}", target_server);
                 let mut target_stream = if is_direct {
                     timeout(
                         time_out,
@@ -314,7 +306,6 @@ where
                     let vpn_node_statistics = vpn_node_statistics.as_mut().unwrap();
                     vpn_node_statistics.incre_count_by_node_info(&node_info.unwrap());
                 }
-                trace!("Connected!");
                 if !is_direct {
                     target_stream.write_all(&req.readed_buffer).await?;
                     let mut _header = [0u8; 2];
@@ -325,13 +316,11 @@ where
                         .await?;
                 }
 
-                trace!("copy bidirectional");
                 let return_value =
                     match tokio::io::copy_bidirectional(&mut self.stream, &mut target_stream).await
                     {
                         // ignore not connected for shutdown error
                         Err(e) if e.kind() == std::io::ErrorKind::NotConnected => {
-                            trace!("already closed");
                             Ok(0)
                         }
                         Err(e) => Err(KittyProxyError::Io(e)),
@@ -433,8 +422,6 @@ impl SOCKSReq {
         //      o  DST.ADDR       desired destination address
         //      o  DST.PORT desired destination port in network octet
         //         order
-        debug!("New connection");
-
         let mut readed_buffer: Vec<u8> = Vec::new();
         let mut header = [0u8; 2];
         // Read a byte from the stream and determine the version being requested
@@ -444,10 +431,10 @@ impl SOCKSReq {
         let socks_version = header[0];
         let auth_method = header[1] as usize;
 
-        trace!("Version: {}", socks_version);
+        debug!("socks version: {}", socks_version);
 
         if socks_version != SOCKS_VERSION {
-            warn!("Init: Unsupported version: SOCKS{}", socks_version);
+            debug!("Init: Unsupported version: SOCKS{}", socks_version);
             stream.shutdown().await?;
             return Err(anyhow!(format!("Not support version: {}.", socks_version)).into());
         }
@@ -456,8 +443,6 @@ impl SOCKSReq {
         readed_buffer.extend_from_slice(&method);
 
         let no_auth = AuthMethod::NoAuth as u8;
-        trace!("0x00 as u8: {no_auth}");
-
         let mut auth_response = [0u8, 2];
         auth_response[0] = SOCKS_VERSION;
         if method.contains(&no_auth) {
@@ -470,12 +455,9 @@ impl SOCKSReq {
             return Err(anyhow!("Socks auth failed.").into());
         }
 
-        trace!("Server waiting for connect");
-
         let mut packet = [0u8; 4];
         // Read a byte from the stream and determine the version being requested
         stream.read_exact(&mut packet).await?;
-        trace!("Server received {:?}", packet);
         readed_buffer.extend_from_slice(&packet);
 
         if packet[0] != SOCKS_VERSION {
@@ -502,7 +484,6 @@ impl SOCKSReq {
             }
         }?;
 
-        trace!("Getting Addr");
         // Get Addr from addr_type and stream
         let addr: Vec<u8> = match addr_type {
             AddrType::Domain => {
@@ -533,7 +514,6 @@ impl SOCKSReq {
         readed_buffer.extend_from_slice(&port);
         let port = (u16::from(port[0]) << 8) | u16::from(port[1]);
         let host = addr_to_host(&addr_type, &addr).await?;
-        trace!("host: {host}");
 
         // Return parsed request
         Ok(SOCKSReq {

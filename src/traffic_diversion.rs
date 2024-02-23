@@ -45,6 +45,18 @@ pub enum TrafficStreamRule {
     Reject,
 }
 
+
+impl fmt::Display for TrafficStreamRule {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        let printable = match self {
+            TrafficStreamRule::Direct => "direct",
+            TrafficStreamRule::Proxy => "proxy",
+            TrafficStreamRule::Reject => "reject",
+        };
+        write!(f, "{}", printable)
+    }
+}
+
 impl SiteIp {
     fn from_str(input: &str) -> SiteIp {
         let res = if let Ok(ip) = input.parse::<std::net::IpAddr>() {
@@ -380,6 +392,7 @@ impl MatchProxy {
             self.root_domain_map.remove(domain_root);
         }
     }
+
 }
 
 #[cfg(test)]
@@ -391,8 +404,8 @@ mod tests {
 
     #[test]
     fn it_works() -> Result<()> {
-        let geoip_file = "/Users/hezhaozhao/myself/kitty/src-tauri/static/kitty_geoip.dat";
-        let geosite_file = "/Users/hezhaozhao/myself/kitty/src-tauri/static/kitty_geosite.dat";
+        let geoip_file = "";
+        let geosite_file = "";
         let mut ins = MatchProxy::from_geo_dat(
             Some(&PathBuf::from_str(geoip_file).unwrap()),
             Some(&PathBuf::from_str(geosite_file).unwrap()),

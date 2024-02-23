@@ -58,7 +58,7 @@ pub struct HttpProxy {
 
 impl HttpProxy {
     pub async fn new(ip: &str, port: u16, timeout: Option<Duration>) -> io::Result<Self> {
-        info!("Listening on {}:{}", ip, port);
+        info!("Http proxy listening on {}:{}", ip, port);
         Ok(Self {
             ip: ip.to_string(),
             port,
@@ -78,7 +78,6 @@ impl HttpProxy {
             .await
             .unwrap();
         self.is_serve = true;
-        info!("Serving Connections...");
         let timeout = self.timeout.clone();
         let match_proxy_clone = Arc::clone(&match_proxy);
         let mut rx_clone = rx.clone();
@@ -102,12 +101,10 @@ impl HttpProxy {
                     Ok(_) => {}
                     Err(error) => {
                         error!("Error! {:?}, client: {:?}", error, client_addr);
-
                         if let Err(e) = HttpReply::new(error.into()).send(&mut client.stream).await
                         {
                             warn!("Failed to send error code: {:?}", e);
                         }
-
                         if let Err(e) = client.shutdown().await {
                             warn!("Failed to shutdown TcpStream: {:?}", e);
                         };
@@ -119,7 +116,6 @@ impl HttpProxy {
                 } => {}
                 _ =  async {
                         if rx_clone.changed().await.is_ok() {
-                            println!("exit");
                             return//该任务退出，别的也会停
                     }
                 } => {}
@@ -158,7 +154,6 @@ where
         match_proxy_share: Arc<RwLock<MatchProxy>>,
         vpn_node_statistics_map: StatisticsMap,
     ) -> Result<usize, KittyProxyError> {
-        debug!("Starting to relay data");
         let req: HttpReq = HttpReq::from_stream(&mut self.stream).await?;
         let time_out = if let Some(time_out) = self.timeout {
             time_out
@@ -168,6 +163,7 @@ where
         let match_proxy = match_proxy_share.read().await;
         let rule = match_proxy.traffic_stream(&req.host);
         drop(match_proxy);
+        info!("[TCP] {}:{} {} connect", req.host, req.port, rule);
 
         let is_direct = match rule {
             TrafficStreamRule::Reject => {
@@ -185,13 +181,11 @@ where
             None
         };
         let target_server = if is_direct {
-            trace!("direct connect");
             format!("{}:{}", req.host, req.port)
         } else {
-            trace!("proxy connect");
             node_info.unwrap().socket_addr.to_string()
         };
-        trace!("req.target_server: {}", target_server);
+        debug!("target_server: {}", target_server);
         let mut target_stream =
             timeout(
                 time_out,
@@ -213,12 +207,10 @@ where
             target_stream.write_all(&req.readed_buffer).await?;
         }
 
-        trace!("copy bidirectional");
         let return_value =
             match tokio::io::copy_bidirectional(&mut self.stream, &mut target_stream).await {
                 // ignore not connected for shutdown error
                 Err(e) if e.kind() == std::io::ErrorKind::NotConnected => {
-                    trace!("already closed");
                     Ok(0)
                 }
                 Err(e) => Err(KittyProxyError::Io(e)),
@@ -265,10 +257,10 @@ impl HttpReq {
         let method = parts.next().expect("Invalid request");
         let origin_path = parts.next().expect("Invalid request");
         let version = parts.next().expect("Invalid request");
-        trace!("http req path:{origin_path}, method:{method}, version:{version}");
+        debug!("http req path:{origin_path}, method:{method}, version:{version}");
 
         if version != "HTTP/1.1" && version != "HTTP/1.0" {
-            warn!("Init: Unsupported version: {}", version);
+            debug!("Init: Unsupported version: {}", version);
             stream.shutdown().await?;
             return Err(anyhow!(format!("Not support version: {}.", version)).into());
         }
@@ -281,7 +273,6 @@ impl HttpReq {
         let host = url.host().map(|x| x.to_owned());
         let port = url.port().unwrap_or(80);
         let host = host.ok_or(ParseError::EmptyHost)?;
-        trace!("host: {:?}", host);
         Ok(HttpReq {
             method: method.to_string(),
             host,
