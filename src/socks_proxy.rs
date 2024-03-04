@@ -258,7 +258,7 @@ where
                 let time_out = if let Some(time_out) = self.timeout {
                     time_out
                 } else {
-                    Duration::from_millis(500)
+                    Duration::from_millis(1000)
                 };
                 let match_proxy = match_proxy_share.read().await;
                 let rule = match_proxy.traffic_stream(&req.host);
