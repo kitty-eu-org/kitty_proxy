@@ -196,8 +196,7 @@ impl SocksProxy {
             {
                 Ok(_) => {}
                 Err(error) => {
-                    error!("Error! {:?}, client: {:?}", error, client_addr);
-
+                    debug!("Error {:?}, client: {:?}", error, client_addr);
                     if let Err(e) = SocksReply::new(error.into()).send(&mut client.stream).await
                     {
                         warn!("Failed to send error code: {:?}", e);
@@ -285,22 +284,16 @@ where
                     node_info.unwrap().socket_addr.to_string()
                 };
                 debug!("req.target_server: {}", target_server);
-                let mut target_stream = if is_direct {
+                let mut target_stream = 
                     timeout(
                         time_out,
                         async move { TcpStream::connect(target_server).await },
                     )
                     .await
-                    .map_err(|_| KittyProxyError::Proxy(ResponseCode::ConnectionRefused))??
-                } else {
-                    timeout(
-                        time_out,
-                        async move { TcpStream::connect(&target_server).await },
-                    )
-                    .await
-                    .map_err(|_| KittyProxyError::Proxy(ResponseCode::ConnectionRefused))??
-                };
-
+                    .map_err(|_| {
+                        error!("Socks5 error {}:{} connect timeout", req.host, req.port);
+                        KittyProxyError::Proxy(ResponseCode::ConnectionRefused)
+                    })??;
                 if !is_direct {
                     let mut vpn_node_statistics = vpn_node_statistics_map.lock().await;
                     let vpn_node_statistics = vpn_node_statistics.as_mut().unwrap();
@@ -321,9 +314,13 @@ where
                     {
                         // ignore not connected for shutdown error
                         Err(e) if e.kind() == std::io::ErrorKind::NotConnected => {
+                            error!("Socks5 error {}:{} {}", req.host, req.port, e);
                             Ok(0)
                         }
-                        Err(e) => Err(KittyProxyError::Io(e)),
+                        Err(e) => {
+                            error!("Socks5 error {}:{} {}", req.host, req.port, e);
+                            Err(KittyProxyError::Io(e))
+                        },
                         Ok((_s_to_t, t_to_s)) => Ok(t_to_s as usize),
                     };
                 if !is_direct {

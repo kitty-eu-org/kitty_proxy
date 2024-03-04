@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
 
-use log::{debug, error, info, trace, warn};
+use log::{debug, error, info, warn};
 
 use anyhow::anyhow;
 use anyhow::Result;
@@ -100,7 +100,7 @@ impl HttpProxy {
                 {
                     Ok(_) => {}
                     Err(error) => {
-                        error!("Error! {:?}, client: {:?}", error, client_addr);
+                        debug!("Error {:?}, client: {:?}", error, client_addr);
                         if let Err(e) = HttpReply::new(error.into()).send(&mut client.stream).await
                         {
                             warn!("Failed to send error code: {:?}", e);
@@ -163,7 +163,7 @@ where
         let match_proxy = match_proxy_share.read().await;
         let rule = match_proxy.traffic_stream(&req.host);
         drop(match_proxy);
-        info!("[TCP] {}:{} {} connect", req.host, req.port, rule);
+        info!("HTTP [TCP] {}:{} {} connect", req.host, req.port, rule);
 
         let is_direct = match rule {
             TrafficStreamRule::Reject => {
@@ -192,7 +192,10 @@ where
                 async move { TcpStream::connect(target_server).await },
             )
             .await
-            .map_err(|_| KittyProxyError::Proxy(ResponseCode::ConnectionRefused))??;
+            .map_err(|_|{
+                error!("HTTP error {}:{} connect timeout", req.host, req.port);
+                KittyProxyError::Proxy(ResponseCode::ConnectionRefused)
+            } )??;
         if !is_direct {
             let mut vpn_node_statistics = vpn_node_statistics_map.lock().await;
             let vpn_node_statistics = vpn_node_statistics.as_mut().unwrap();
@@ -211,9 +214,13 @@ where
             match tokio::io::copy_bidirectional(&mut self.stream, &mut target_stream).await {
                 // ignore not connected for shutdown error
                 Err(e) if e.kind() == std::io::ErrorKind::NotConnected => {
+                    error!("HTTP error {}:{} {}", req.host, req.port, e);
                     Ok(0)
                 }
-                Err(e) => Err(KittyProxyError::Io(e)),
+                Err(e) => {
+                    error!("HTTP error {}:{} {}", req.host, req.port, e);
+                    Err(KittyProxyError::Io(e))
+                },
                 Ok((_s_to_t, t_to_s)) => Ok(t_to_s as usize),
             };
         if !is_direct {
