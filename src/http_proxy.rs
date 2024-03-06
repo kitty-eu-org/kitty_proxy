@@ -5,6 +5,7 @@ use log::{debug, error, info, warn};
 use anyhow::anyhow;
 use anyhow::Result;
 use std::io;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
@@ -92,6 +93,7 @@ impl HttpProxy {
                         let (stream, client_addr) = listener.accept().await.unwrap();
                         let match_proxy_clone = match_proxy_clone.clone();
                         let statistics_map_clone = statistics_map_clone.clone();
+                        let local_addr = stream.local_addr().unwrap();
                         tokio::spawn(async move {
                             let mut client = HttpClient::new(stream, timeout);
                 match client
@@ -100,13 +102,13 @@ impl HttpProxy {
                 {
                     Ok(_) => {}
                     Err(error) => {
-                        debug!("Error {:?}, client: {:?}", error, client_addr);
+                        debug!("Error {:?}, client: {:?}, local_addr: {}", error, client_addr, local_addr);
                         if let Err(e) = HttpReply::new(error.into()).send(&mut client.stream).await
                         {
-                            warn!("Failed to send error code: {:?}", e);
+                            warn!("Failed to send error code: {:?}, local_addr: {}", e, local_addr);
                         }
                         if let Err(e) = client.shutdown().await {
-                            warn!("Failed to shutdown TcpStream: {:?}", e);
+                            warn!("Failed to shutdown TcpStream: {:?}, local_addr: {}", e, local_addr);
                         };
                     }
                 };
@@ -128,17 +130,13 @@ impl HttpProxy {
     }
 }
 
-pub struct HttpClient<T: AsyncRead + AsyncWrite + Send + Unpin + 'static> {
-    stream: T,
+pub struct HttpClient {
+    stream: TcpStream,
     timeout: Option<Duration>,
 }
 
-impl<T> HttpClient<T>
-where
-    T: AsyncRead + AsyncWrite + Send + Unpin + 'static,
-{
-    /// Create a new SOCKClient
-    pub fn new(stream: T, timeout: Option<Duration>) -> Self {
+impl HttpClient {
+    pub fn new(stream: TcpStream, timeout: Option<Duration>) -> Self {
         Self { stream, timeout }
     }
 
@@ -146,6 +144,10 @@ where
     pub async fn shutdown(&mut self) -> io::Result<()> {
         self.stream.shutdown().await?;
         Ok(())
+    }
+
+    fn get_local_addr(&self) -> SocketAddr {
+        self.stream.local_addr().unwrap()
     }
 
     /// Handles a client
@@ -163,7 +165,7 @@ where
         let match_proxy = match_proxy_share.read().await;
         let rule = match_proxy.traffic_stream(&req.host);
         drop(match_proxy);
-        info!("HTTP [TCP] {}:{} {} connect", req.host, req.port, rule);
+        info!("HTTP [TCP] {}:{} {} connect local_addr: {}", req.host, req.port, rule, self.get_local_addr());
 
         let is_direct = match rule {
             TrafficStreamRule::Reject => {
@@ -192,10 +194,10 @@ where
                 async move { TcpStream::connect(target_server).await },
             )
             .await
-            .map_err(|_|{
-                error!("HTTP error {}:{} connect timeout", req.host, req.port);
+            .map_err(|_| {
+                error!("HTTP error {}:{} connect timeout, local_addr: {}", req.host, req.port, self.get_local_addr());
                 KittyProxyError::Proxy(ResponseCode::ConnectionRefused)
-            } )??;
+            })??;
         if !is_direct {
             let mut vpn_node_statistics = vpn_node_statistics_map.lock().await;
             let vpn_node_statistics = vpn_node_statistics.as_mut().unwrap();
@@ -214,13 +216,13 @@ where
             match tokio::io::copy_bidirectional(&mut self.stream, &mut target_stream).await {
                 // ignore not connected for shutdown error
                 Err(e) if e.kind() == std::io::ErrorKind::NotConnected => {
-                    error!("HTTP error {}:{} {}", req.host, req.port, e);
+                    error!("HTTP error {}:{} {}, local_addr: {}", req.host, req.port, e , self.get_local_addr());
                     Ok(0)
                 }
                 Err(e) => {
-                    error!("HTTP error {}:{} {}", req.host, req.port, e);
+                    error!("HTTP error {}:{} {}, local_addr: {}", req.host, req.port, e, self.get_local_addr());
                     Err(KittyProxyError::Io(e))
-                },
+                }
                 Ok((_s_to_t, t_to_s)) => Ok(t_to_s as usize),
             };
         if !is_direct {
