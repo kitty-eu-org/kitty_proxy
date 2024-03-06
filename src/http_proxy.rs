@@ -259,7 +259,6 @@ impl HttpReq {
                 break;
             }
         }
-        println!("request_headers: {:?}", request_headers);
         let request_first_line = request_headers.get(0).unwrap().clone();
         let mut parts = request_first_line.split_whitespace();
         let method = parts.next().expect("Invalid request");
