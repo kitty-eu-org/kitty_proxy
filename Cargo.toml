@@ -20,6 +20,9 @@ cidr = { version = "0.2.2", features = ["bitstring", "serde"] }
 regex = "1.10.2"
 addr = "0.15.6"
 url = { version = "2.5.0", features = ["serde"] }
+hyper = { version = "1", features = ["full"] }
+http-body-util = "0.1"
+hyper-util = { version = "0.1", features = ["full"] }
 
 
 [build-dependencies]

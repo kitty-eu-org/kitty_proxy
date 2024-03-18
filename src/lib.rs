@@ -1,4 +1,5 @@
 mod http_proxy;
+mod http1_proxy;
 mod socks_proxy;
 mod types;
 mod v2ray_config;
