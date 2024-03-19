@@ -6,9 +6,9 @@ use log::error;
 use std::collections::HashMap;
 
 use snafu::Snafu;
-use url::ParseError;
+use url::{Host, ParseError};
 
-use std::net::{IpAddr, SocketAddr, SocketAddrV4};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::sync::Arc;
 use std::{fmt, io};
 use thiserror::Error;
@@ -148,6 +148,18 @@ impl From<(IpAddr, u16)> for Address {
         match ip {
             IpAddr::V4(ip) => Address::from(SocketAddr::new(IpAddr::V4(ip), port)),
             IpAddr::V6(ip) => Address::from(SocketAddr::new(IpAddr::V6(ip), port)),
+        }
+    }
+}
+
+impl From<&Address> for Host {
+    fn from(value: &Address) -> Host {
+        match value {
+            Address::SocketAddress(s) => match s {
+                SocketAddr::V4(s) => Host::Ipv4(s.ip().to_owned()),
+                SocketAddr::V6(s) => Host::Ipv6(s.ip().to_owned()),
+            },
+            Address::DomainNameAddress(addr, ref _port) => Host::Domain(addr.to_owned()),
         }
     }
 }
