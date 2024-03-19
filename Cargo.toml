@@ -23,6 +23,8 @@ url = { version = "2.5.0", features = ["serde"] }
 hyper = { version = "1", features = ["full"] }
 http-body-util = "0.1"
 hyper-util = { version = "0.1", features = ["full"] }
+native-tls = {version = "0.2.11", features = ["alpn"]}
+tokio-native-tls = "0.3.1"
 
 
 [build-dependencies]
