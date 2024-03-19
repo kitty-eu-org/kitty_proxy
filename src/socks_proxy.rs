@@ -14,8 +14,9 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Mutex;
 use tokio::time::timeout;
 
+use crate::banlancer::{ArcConnectionStatsBanlancer, ConnectionStatsBanlancer};
 use crate::traffic_diversion::TrafficStreamRule;
-use crate::types::{KittyProxyError, NodeInfo, NodeStatistics, ResponseCode, StatisticsMap};
+use crate::types::{KittyProxyError, NodeInfo, ResponseCode};
 use crate::MatchProxy;
 
 /// Version of socks
@@ -147,7 +148,7 @@ pub struct SocksProxy {
     ip: String,
     port: u16,
     timeout: Option<Duration>,
-    node_statistics_map: StatisticsMap,
+    balancer: ArcConnectionStatsBanlancer,
     is_serve: bool,
 }
 
@@ -159,7 +160,7 @@ impl SocksProxy {
             ip: ip.to_string(),
             port,
             timeout,
-            node_statistics_map: Arc::new(Mutex::new(None)),
+            balancer: Arc::new(Mutex::new(None)),
             is_serve: false,
         })
     }
@@ -177,10 +178,10 @@ impl SocksProxy {
         let timeout = self.timeout.clone();
         let match_proxy_clone = Arc::clone(&match_proxy);
         let mut rx_clone = rx.clone();
-        let mut statistics_map = self.node_statistics_map.lock().await;
-        *statistics_map = Some(NodeStatistics::from_vec(&vpn_node_infos));
-        drop(statistics_map);
-        let statistics_map_clone = Arc::clone(&self.node_statistics_map);
+        let mut balancer = self.balancer.lock().await;
+        *balancer = Some(ConnectionStatsBanlancer::from_vec(&vpn_node_infos));
+        drop(balancer);
+        let balancer = Arc::clone(&self.balancer);
 
         tokio::spawn(async move {
             tokio::select! {
@@ -188,7 +189,7 @@ impl SocksProxy {
                     loop {
                         let (stream, client_addr) = listener.accept().await.unwrap();
                         let match_proxy_clone = match_proxy_clone.clone();
-                        let statistics_map_clone = statistics_map_clone.clone();
+                        let statistics_map_clone = balancer.clone();
                         let mut client = SOCKClient::new(stream, timeout);
             match client
                 .handle_client(match_proxy_clone, statistics_map_clone)
@@ -246,7 +247,7 @@ where
     pub async fn handle_client(
         &mut self,
         match_proxy_share: Arc<RwLock<MatchProxy>>,
-        vpn_node_statistics_map: StatisticsMap,
+        arc_banlancer: ArcConnectionStatsBanlancer,
     ) -> Result<usize, KittyProxyError> {
         let req = SOCKSReq::from_stream(&mut self.stream).await?;
 
@@ -272,9 +273,9 @@ where
                     TrafficStreamRule::Proxy => false,
                 };
                 let node_info = if !is_direct {
-                    let vpn_node_statistics = vpn_node_statistics_map.lock().await;
-                    let vpn_node_statistics_ref = vpn_node_statistics.as_ref().unwrap();
-                    Some(vpn_node_statistics_ref.get_least_connected_node().await)
+                    let banlancer = arc_banlancer.lock().await;
+                    let banlancer_ref = banlancer.as_ref().unwrap();
+                    Some(banlancer_ref.get_least_connected_node().await)
                 } else {
                     None
                 };
@@ -284,7 +285,7 @@ where
                     node_info.unwrap().socket_addr.to_string()
                 };
                 debug!("req.target_server: {}", target_server);
-                let mut target_stream = 
+                let mut target_stream =
                     timeout(
                         time_out,
                         async move { TcpStream::connect(target_server).await },
@@ -295,9 +296,9 @@ where
                         KittyProxyError::Proxy(ResponseCode::ConnectionRefused)
                     })??;
                 if !is_direct {
-                    let mut vpn_node_statistics = vpn_node_statistics_map.lock().await;
-                    let vpn_node_statistics = vpn_node_statistics.as_mut().unwrap();
-                    vpn_node_statistics.incre_count_by_node_info(&node_info.unwrap());
+                    let mut banlancer = arc_banlancer.lock().await;
+                    let banlancer_ref = banlancer.as_mut().unwrap();
+                    banlancer_ref.incre_count_by_node_info(&node_info.unwrap());
                 }
                 if !is_direct {
                     target_stream.write_all(&req.readed_buffer).await?;
@@ -320,13 +321,13 @@ where
                         Err(e) => {
                             error!("Socks5 error {}:{} {}", req.host, req.port, e);
                             Err(KittyProxyError::Io(e))
-                        },
+                        }
                         Ok((_s_to_t, t_to_s)) => Ok(t_to_s as usize),
                     };
                 if !is_direct {
-                    let mut vpn_node_statistics = vpn_node_statistics_map.lock().await;
-                    let vpn_node_statistics = vpn_node_statistics.as_mut().unwrap();
-                    vpn_node_statistics.decre_count_by_node_info(&node_info.unwrap());
+                    let mut banlancer = arc_banlancer.lock().await;
+                    let banlancer_ref = banlancer.as_mut().unwrap();
+                    banlancer_ref.decre_count_by_node_info(&node_info.unwrap());
                 }
                 return_value
             }

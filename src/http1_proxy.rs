@@ -1,22 +1,25 @@
 #![forbid(unsafe_code)]
 
-use http_body_util::combinators::BoxBody;
 use hyper::body::Bytes;
+use hyper::client::conn::http1::Builder;
 use hyper::server::conn::http1;
+use hyper::service::service_fn;
+use hyper::upgrade::Upgraded;
 use hyper_util::rt::TokioIo;
 use log::trace;
 use log::{debug, error, info, warn};
 
 use anyhow::anyhow;
 use anyhow::Result;
-use std::{fmt, io};
 use std::net::IpAddr;
 use std::net::Ipv4Addr;
 use std::net::Ipv6Addr;
 use std::net::SocketAddr;
 use std::net::SocketAddrV4;
+use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
+use std::{fmt, io};
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::watch::Receiver;
@@ -25,22 +28,19 @@ use tokio::sync::RwLock;
 use tokio::time::timeout;
 use url::{Host, ParseError, Url};
 
+use crate::banlancer::{ArcConnectionStatsBanlancer, ConnectionStatsBanlancer};
 use crate::traffic_diversion::TrafficStreamRule;
-use crate::types::{KittyProxyError, NodeInfo, NodeStatistics, ResponseCode, StatisticsMap};
+use crate::types::{Address, KittyProxyError, NodeInfo, ResponseCode};
 use crate::MatchProxy;
 
 use hyper::{
     body,
     header::{self, HeaderValue},
     http::uri::{Authority, Scheme},
-    HeaderMap,
-    Method,
-    Request,
-    Response,
-    StatusCode,
-    Uri,
-    Version,
+    HeaderMap, Method, Request, Response, StatusCode, Uri, Version,
 };
+
+use http_body_util::{combinators::BoxBody, BodyExt};
 
 pub fn host_addr(uri: &Uri) -> Option<Address> {
     match uri.authority() {
@@ -48,69 +48,6 @@ pub fn host_addr(uri: &Uri) -> Option<Address> {
         Some(authority) => authority_addr(uri.scheme_str(), authority),
     }
 }
-
-#[derive(Clone, PartialEq, Eq, Hash)]
-pub enum Address {
-    /// Socket address (IP Address)
-    SocketAddress(SocketAddr),
-    /// Domain name address (SOCKS4a)
-    DomainNameAddress(String, u16),
-}
-
-
-impl fmt::Debug for Address {
-    #[inline]
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match *self {
-            Address::SocketAddress(ref addr) => write!(f, "{addr}"),
-            Address::DomainNameAddress(ref addr, ref port) => write!(f, "{addr}:{port}"),
-        }
-    }
-}
-
-impl fmt::Display for Address {
-    #[inline]
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match *self {
-            Address::SocketAddress(ref addr) => write!(f, "{addr}"),
-            Address::DomainNameAddress(ref addr, ref port) => write!(f, "{addr}:{port}"),
-        }
-    }
-}
-
-impl From<SocketAddrV4> for Address {
-    fn from(s: SocketAddrV4) -> Address {
-        Address::SocketAddress(s)
-    }
-}
-
-impl From<(String, u16)> for Address {
-    fn from((dn, port): (String, u16)) -> Address {
-        Address::DomainNameAddress(dn, port)
-    }
-}
-
-impl From<(&str, u16)> for Address {
-    fn from((dn, port): (&str, u16)) -> Address {
-        Address::DomainNameAddress(dn.to_owned(), port)
-    }
-}
-
-impl From<&Address> for Address {
-    fn from(addr: &Address) -> Address {
-        addr.clone()
-    }
-}
-
-impl From<Address> for socks5::Address {
-    fn from(addr: Address) -> socks5::Address {
-        match addr {
-            Address::SocketAddress(a) => socks5::Address::SocketAddress(SocketAddr::V4(a)),
-            Address::DomainNameAddress(d, p) => socks5::Address::DomainNameAddress(d, p),
-        }
-    }
-}
-
 
 fn empty_body() -> BoxBody<Bytes, hyper::Error> {
     http_body_util::Empty::<Bytes>::new()
@@ -220,14 +157,14 @@ pub fn authority_addr(scheme_str: Option<&str>, authority: &Authority) -> Option
         // Must be a IPv6 address
         let addr = &host_str[1..host_str.len() - 1];
         match addr.parse::<Ipv6Addr>() {
-            Ok(a) => Some(Address::from(SocketAddr::new(IpAddr::V6(a), port))),
+            Ok(a) => Some(Address::from((IpAddr::V6(a), port))),
             // Ignore invalid IPv6 address
             Err(..) => None,
         }
     } else {
         // It must be a IPv4 address
         match host_str.parse::<Ipv4Addr>() {
-            Ok(a) => Some(Address::from(SocketAddr::new(IpAddr::V4(a), port))),
+            Ok(a) => Some(Address::from((IpAddr::V4(a), port))),
             // Should be a domain name, or a invalid IP address.
             // Let DNS deal with it.
             Err(..) => Some(Address::DomainNameAddress(host_str.to_owned(), port)),
@@ -243,7 +180,12 @@ fn get_addr_from_header(req: &mut Request<body::Incoming>) -> Result<Address, ()
                 match Authority::from_str(shost) {
                     Ok(authority) => match authority_addr(req.uri().scheme_str(), &authority) {
                         Some(host) => {
-                            trace!("HTTP {} URI {} got host from header: {}", req.method(), req.uri(), host);
+                            trace!(
+                                "HTTP {} URI {} got host from header: {}",
+                                req.method(),
+                                req.uri(),
+                                host
+                            );
 
                             // Reassemble URI
                             let mut parts = req.uri().clone().into_parts();
@@ -306,6 +248,54 @@ fn get_addr_from_header(req: &mut Request<body::Incoming>) -> Result<Address, ()
     }
 }
 
+fn get_keep_alive_val(values: header::GetAll<HeaderValue>) -> Option<bool> {
+    let mut conn_keep_alive = None;
+    for value in values {
+        if let Ok(value) = value.to_str() {
+            if value.eq_ignore_ascii_case("close") {
+                conn_keep_alive = Some(false);
+            } else {
+                for part in value.split(',') {
+                    let part = part.trim();
+                    if part.eq_ignore_ascii_case("keep-alive") {
+                        conn_keep_alive = Some(true);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    conn_keep_alive
+}
+
+pub fn check_keep_alive(
+    version: Version,
+    headers: &HeaderMap<HeaderValue>,
+    check_proxy: bool,
+) -> bool {
+    // HTTP/1.1, HTTP/2, HTTP/3 keeps alive by default
+    let mut conn_keep_alive = !matches!(version, Version::HTTP_09 | Version::HTTP_10);
+
+    if check_proxy {
+        // Modern browsers will send Proxy-Connection instead of Connection
+        // for HTTP/1.0 proxies which blindly forward Connection to remote
+        //
+        // https://tools.ietf.org/html/rfc7230#appendix-A.1.2
+        if let Some(b) = get_keep_alive_val(headers.get_all("Proxy-Connection")) {
+            conn_keep_alive = b
+        }
+    }
+
+    // Connection will replace Proxy-Connection
+    //
+    // But why client sent both Connection and Proxy-Connection? That's not standard!
+    if let Some(b) = get_keep_alive_val(headers.get_all("Connection")) {
+        conn_keep_alive = b
+    }
+
+    conn_keep_alive
+}
+
 pub struct HttpReply {
     buf: Vec<u8>,
 }
@@ -335,11 +325,29 @@ impl HttpReply {
     }
 }
 
+async fn tunnel(upgraded: Upgraded, addr: String) -> std::io::Result<()> {
+    // Connect to remote server
+    let mut server = TcpStream::connect(addr).await?;
+    let mut upgraded = TokioIo::new(upgraded);
+
+    // Proxying data
+    let (from_client, from_server) =
+        tokio::io::copy_bidirectional(&mut upgraded, &mut server).await?;
+
+    // Print message when done
+    println!(
+        "client wrote {} bytes and received {} bytes",
+        from_client, from_server
+    );
+
+    Ok(())
+}
+
 pub struct HttpProxy {
     ip: String,
     port: u16,
     timeout: Option<Duration>,
-    node_statistics_map: StatisticsMap,
+    banlancer: ArcConnectionStatsBanlancer,
     is_serve: bool,
 }
 
@@ -350,7 +358,7 @@ impl HttpProxy {
             ip: ip.to_string(),
             port,
             timeout,
-            node_statistics_map: Arc::new(Mutex::new(None)),
+            banlancer: Arc::new(Mutex::new(None)),
             is_serve: false,
         })
     }
@@ -368,344 +376,115 @@ impl HttpProxy {
         let timeout = self.timeout.clone();
         let match_proxy_clone = Arc::clone(&match_proxy);
         let mut rx_clone = rx.clone();
-        let mut statistics_map = self.node_statistics_map.lock().await;
-        *statistics_map = Some(NodeStatistics::from_vec(&vpn_node_infos));
-        drop(statistics_map);
-        let statistics_map_clone = Arc::clone(&self.node_statistics_map);
+        let mut banlancer = self.banlancer.lock().await;
+        *banlancer = Some(ConnectionStatsBanlancer::from_vec(&vpn_node_infos));
+        drop(banlancer);
+        let banlancer_clone = Arc::clone(&self.banlancer);
         tokio::spawn(async move {
             tokio::select! {
-                _ = async {
-                    loop {
-                        let (stream, client_addr) = listener.accept().await.unwrap();
-                        let match_proxy_clone = match_proxy_clone.clone();
-                        let statistics_map_clone = statistics_map_clone.clone();
-                        let local_addr = stream.local_addr().unwrap();
-                        tokio::spawn(async move {
-                            let mut client = HttpClient::new(stream, timeout);
-                match client
-                    .handle_client(match_proxy_clone, statistics_map_clone)
+                    _ = async {
+                        loop {
+                            let (stream, client_addr) = listener.accept().await.unwrap();
+                            let match_proxy_clone = match_proxy_clone.clone();
+                            let banlancer_clone = banlancer_clone.clone();
+                            let local_addr = stream.local_addr().unwrap();
+                            let io = TokioIo::new(stream);
+
+            tokio::task::spawn(async move {
+                if let Err(err) = http1::Builder::new()
+                    .preserve_header_case(true)
+                    .title_case_headers(true)
+                    .serve_connection(io, service_fn(serve_connection))
+                    .with_upgrades()
                     .await
                 {
-                    Ok(_) => {}
-                    Err(error) => {
-                        debug!("Error {:?}, client: {:?}, local_addr: {}", error, client_addr, local_addr);
-                        if let Err(e) = HttpReply::new(error.into()).send(&mut client.stream).await
-                        {
-                            warn!("Failed to send error code: {:?}, local_addr: {}", e, local_addr);
+                    println!("Failed to serve connection: {:?}", err);
+                }
+            });
                         }
-                        if let Err(e) = client.shutdown().await {
-                            warn!("Failed to shutdown TcpStream: {:?}, local_addr: {}", e, local_addr);
-                        };
-                    }
-                };
-
-                         });
-                    }
-                } => {}
-                _ =  async {
-                        if rx_clone.changed().await.is_ok() {
-                            return//该任务退出，别的也会停
-                    }
-                } => {}
-            }
+                    } => {}
+                    _ =  async {
+                            if rx_clone.changed().await.is_ok() {
+                                return//该任务退出，别的也会停
+                        }
+                    } => {}
+                }
         });
     }
 
     pub fn is_serving(&self) -> bool {
         self.is_serve
     }
+}
 
-    pub async fn serve_connection(
-        self,
-        mut req: Request<body::Incoming>,
-    ) -> hyper::Result<Response<BoxBody<Bytes, hyper::Error>>> {
-        // trace!("request {} {:?}", self.peer_addr, req);
+pub async fn serve_connection(
+    mut req: Request<body::Incoming>,
+) -> hyper::Result<Response<BoxBody<Bytes, hyper::Error>>> {
+    // Parse URI
+    //
+    // Proxy request URI must contains a host
+    let host: Address = match host_addr(req.uri()) {
+        None => {
+            if req.uri().authority().is_some() {
+                // URI has authority but invalid
+                error!(
+                    "HTTP {} URI {} doesn't have a valid host",
+                    req.method(),
+                    req.uri()
+                );
+                return make_bad_request();
+            } else {
+                trace!(
+                    "HTTP {} URI {} doesn't have a valid host",
+                    req.method(),
+                    req.uri()
+                );
+            }
 
-        // Parse URI
+            match get_addr_from_header(&mut req) {
+                Ok(h) => h,
+                Err(()) => return make_bad_request(),
+            }
+        }
+        Some(h) => h,
+    };
+
+    if req.method() == Method::CONNECT {
+        // Establish a TCP tunnel
+        // https://tools.ietf.org/html/draft-luotonen-web-proxy-tunneling-01
+
+        debug!("HTTP CONNECT {}", host);
+
+        // Connect to Shadowsocks' remote
         //
-        // Proxy request URI must contains a host
-        let host = match host_addr(req.uri()) {
-            None => {
-                if req.uri().authority().is_some() {
-                    // URI has authority but invalid
-                    error!("HTTP {} URI {} doesn't have a valid host", req.method(), req.uri());
-                    return make_bad_request();
-                } else {
-                    trace!("HTTP {} URI {} doesn't have a valid host", req.method(), req.uri());
+        // FIXME: What STATUS should I return for connection error?
+        tokio::task::spawn(async move {
+            match hyper::upgrade::on(req).await {
+                Ok(upgraded) => {
+                    if let Err(e) = tunnel(upgraded, host.to_string()).await {
+                        eprintln!("server io error: {}", e);
+                    };
                 }
-
-                match get_addr_from_header(&mut req) {
-                    Ok(h) => h,
-                    Err(()) => return make_bad_request(),
-                }
+                Err(e) => eprintln!("upgrade error: {}", e),
             }
-            Some(h) => h,
-        };
+        });
 
-        if req.method() == Method::CONNECT {
-            // Establish a TCP tunnel
-            // https://tools.ietf.org/html/draft-luotonen-web-proxy-tunneling-01
-
-            debug!("HTTP CONNECT {}", host);
-
-            // Connect to Shadowsocks' remote
-            //
-            // FIXME: What STATUS should I return for connection error?
-            let (mut stream, server_opt) = match connect_host(self.context, &host, &self.balancer).await {
-                Ok(s) => s,
-                Err(err) => {
-                    error!("failed to CONNECT host: {}, error: {}", host, err);
-                    return make_internal_server_error();
-                }
-            };
-
-            // debug!(
-            //     "CONNECT relay connected {} <-> {} ({})",
-            //     self.peer_addr,
-            //     host,
-            //     if stream.is_bypassed() { "bypassed" } else { "proxied" }
-            // );
-
-            let client_addr = self.peer_addr;
-            tokio::spawn(async move {
-                match hyper::upgrade::on(req).await {
-                    Ok(upgraded) => {
-                        trace!("CONNECT tunnel upgrade success, {} <-> {}", client_addr, host);
-
-                        let mut upgraded_io = TokioIo::new(upgraded);
-
-                        let _ = match server_opt {
-                            Some(server) => {
-                                establish_tcp_tunnel(
-                                    server.server_config(),
-                                    &mut upgraded_io,
-                                    &mut stream,
-                                    client_addr,
-                                    &host,
-                                )
-                                .await
-                            }
-                            None => {
-                                establish_tcp_tunnel_bypassed(&mut upgraded_io, &mut stream, client_addr, &host).await
-                            }
-                        };
-                    }
-                    Err(err) => {
-                        error!("failed to upgrade CONNECT request, error: {}", err);
-                    }
-                }
-            });
-
-            return Ok(Response::new(empty_body()));
-        }
-
-        // Traditional HTTP Proxy request
-
-        let method = req.method().clone();
-        let version = req.version();
-        debug!("HTTP {} {} {:?}", method, host, version);
-
-        // Check if client wants us to keep long connection
-        let conn_keep_alive = check_keep_alive(version, req.headers(), true);
-
-        // Remove non-forwardable headers
-        clear_hop_headers(req.headers_mut());
-
-        // Set keep-alive for connection with remote
-        set_conn_keep_alive(version, req.headers_mut(), conn_keep_alive);
-
-        let mut res = match self.http_client.send_request(self.context, req, &self.balancer).await {
-            Ok(resp) => resp,
-            Err(HttpClientError::Hyper(e)) => return Err(e),
-            Err(HttpClientError::Io(err)) => {
-                error!("failed to make request to host: {}, error: {}", host, err);
-                return make_internal_server_error();
-            }
-        };
-
-        trace!("received {} <- {} {:?}", self.peer_addr, host, res);
-
-        let res_keep_alive = conn_keep_alive && check_keep_alive(res.version(), res.headers(), false);
-
-        // Clear unforwardable headers
-        clear_hop_headers(res.headers_mut());
-
-        if res.version() != version {
-            // Reset version to matches req's version
-            trace!("response version {:?} => {:?}", res.version(), version);
-            *res.version_mut() = version;
-        }
-
-        // Set Connection header
-        set_conn_keep_alive(res.version(), res.headers_mut(), res_keep_alive);
-
-        trace!("response {} <- {} {:?}", self.peer_addr, host, res);
-
-        debug!("HTTP {} relay {} <-> {} finished", method, self.peer_addr, host);
-
-        Ok(res.map(|b| b.boxed()))
+        return Ok(Response::new(empty_body()));
     }
-}
+    let stream = TcpStream::connect(host.to_string()).await.unwrap();
+    let io = TokioIo::new(stream);
 
-pub struct HttpClient {
-    stream: TcpStream,
-    timeout: Option<Duration>,
-}
-
-impl HttpClient {
-    pub fn new(stream: TcpStream, timeout: Option<Duration>) -> Self {
-        Self { stream, timeout }
-    }
-
-    /// Shutdown a client
-    pub async fn shutdown(&mut self) -> io::Result<()> {
-        self.stream.shutdown().await?;
-        Ok(())
-    }
-
-    fn get_local_addr(&self) -> SocketAddr {
-        self.stream.local_addr().unwrap()
-    }
-
-    /// Handles a client
-    pub async fn handle_client(
-        &mut self,
-        match_proxy_share: Arc<RwLock<MatchProxy>>,
-        vpn_node_statistics_map: StatisticsMap,
-    ) -> Result<usize, KittyProxyError> {
-        let req: HttpReq = HttpReq::from_stream(&mut self.stream).await?;
-
-        let time_out = if let Some(time_out) = self.timeout {
-            time_out
-        } else {
-            Duration::from_millis(1000)
-        };
-        let match_proxy = match_proxy_share.read().await;
-        let rule = match_proxy.traffic_stream(&req.host);
-        drop(match_proxy);
-        info!("HTTP [TCP] {}:{} {} connect local_addr: {}", req.host, req.port, rule, self.get_local_addr());
-
-        let is_direct = match rule {
-            TrafficStreamRule::Reject => {
-                self.shutdown().await?;
-                return Ok(0 as usize);
-            }
-            TrafficStreamRule::Direct => true,
-            TrafficStreamRule::Proxy => false,
-        };
-        let node_info = if !is_direct {
-            let vpn_node_statistics = vpn_node_statistics_map.lock().await;
-            let vpn_node_statistics_ref = vpn_node_statistics.as_ref().unwrap();
-            Some(vpn_node_statistics_ref.get_least_connected_node().await)
-        } else {
-            None
-        };
-        let target_server = if is_direct {
-            format!("{}:{}", req.host, req.port)
-        } else {
-            node_info.unwrap().socket_addr.to_string()
-        };
-        debug!("target_server: {}", target_server);
-        let mut target_stream =
-            timeout(
-                time_out,
-                async move { TcpStream::connect(target_server).await },
-            )
-            .await
-            .map_err(|_| {
-                error!("HTTP error {}:{} connect timeout, local_addr: {}", req.host, req.port, self.get_local_addr());
-                KittyProxyError::Proxy(ResponseCode::ConnectionRefused)
-            })??;
-        if !is_direct {
-            let mut vpn_node_statistics = vpn_node_statistics_map.lock().await;
-            let vpn_node_statistics = vpn_node_statistics.as_mut().unwrap();
-            vpn_node_statistics.incre_count_by_node_info(&node_info.unwrap());
+    let (mut sender, conn) = Builder::new()
+        .preserve_header_case(true)
+        .title_case_headers(true)
+        .handshake(io)
+        .await?;
+    tokio::task::spawn(async move {
+        if let Err(err) = conn.await {
+            println!("Connection failed: {:?}", err);
         }
+    });
 
-        if req.method == "CONNECT" && is_direct {
-            self.stream
-                .write_all(format!("{} 200 Connection established\r\n\r\n", req.version).as_bytes())
-                .await?;
-        } else {
-            target_stream.write_all(&req.readed_buffer).await?;
-        }
-
-        let return_value =
-            match tokio::io::copy_bidirectional(&mut self.stream, &mut target_stream).await {
-                // ignore not connected for shutdown error
-                Err(e) if e.kind() == std::io::ErrorKind::NotConnected => {
-                    error!("HTTP error {}:{} {}, local_addr: {}", req.host, req.port, e , self.get_local_addr());
-                    Ok(0)
-                }
-                Err(e) => {
-                    error!("HTTP error {}:{} {}, local_addr: {}", req.host, req.port, e, self.get_local_addr());
-                    Err(KittyProxyError::Io(e))
-                }
-                Ok((_s_to_t, t_to_s)) => Ok(t_to_s as usize),
-            };
-        if !is_direct {
-            let mut vpn_node_statistics = vpn_node_statistics_map.lock().await;
-            let vpn_node_statistics = vpn_node_statistics.as_mut().unwrap();
-            vpn_node_statistics.decre_count_by_node_info(&node_info.unwrap());
-        }
-        return_value
-    }
-}
-
-/// Proxy User Request
-#[allow(dead_code)]
-struct HttpReq {
-    pub method: String,
-    pub host: Host,
-    pub port: u16,
-    pub readed_buffer: Vec<u8>,
-    pub version: String,
-}
-
-impl HttpReq {
-    /// Parse a SOCKS Req from a TcpStream
-    async fn from_stream<T>(stream: &mut T) -> Result<Self, KittyProxyError>
-    where
-        T: AsyncRead + AsyncWrite + Send + Unpin + 'static,
-    {
-        let mut request_headers: Vec<String> = Vec::new();
-        let mut reader: BufReader<&mut T> = BufReader::new(stream);
-
-        loop {
-            let mut tmp = String::new();
-            reader.read_line(&mut tmp).await?;
-            request_headers.push(tmp.clone());
-            if tmp == "\r\n" {
-                break;
-            }
-        }
-        let request_first_line = request_headers.get(0).unwrap().clone();
-        let mut parts = request_first_line.split_whitespace();
-        let method = parts.next().expect("Invalid request");
-        let origin_path = parts.next().expect("Invalid request");
-        let version = parts.next().expect("Invalid request");
-        debug!("http req path:{origin_path}, method:{method}, version:{version}");
-
-        if version != "HTTP/1.1" && version != "HTTP/1.0" {
-            debug!("Init: Unsupported version: {}", version);
-            stream.shutdown().await?;
-            return Err(anyhow!(format!("Not support version: {}.", version)).into());
-        }
-
-        let mut origin_path = origin_path.to_string();
-        if method == "CONNECT" {
-            origin_path.insert_str(0, "http://")
-        };
-        let url = Url::parse(&origin_path)?;
-        let host = url.host().map(|x| x.to_owned());
-        let port = url.port().unwrap_or(80);
-        let host = host.ok_or(ParseError::EmptyHost)?;
-        Ok(HttpReq {
-            method: method.to_string(),
-            host,
-            port,
-            readed_buffer: request_headers.join("").as_bytes().to_vec(),
-            version: version.into(),
-        })
-    }
+    let resp = sender.send_request(req).await?;
+    Ok(resp.map(|b| b.boxed()))
 }

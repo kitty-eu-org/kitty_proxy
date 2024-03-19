@@ -8,9 +8,9 @@ use std::collections::HashMap;
 use snafu::Snafu;
 use url::ParseError;
 
-use std::io;
-use std::net::{SocketAddr, IpAddr};
+use std::net::{IpAddr, SocketAddr, SocketAddrV4};
 use std::sync::Arc;
+use std::{fmt, io};
 use thiserror::Error;
 use tokio::sync::Mutex;
 
@@ -70,53 +70,84 @@ pub struct NodeInfo {
     pub node_number: i8,
 }
 
-
 impl NodeInfo {
     pub fn new(ip_addr: IpAddr, port: u16, node_number: i8) -> Self {
-        Self { socket_addr: SocketAddr::new(ip_addr, port), node_number }
+        Self {
+            socket_addr: SocketAddr::new(ip_addr, port),
+            node_number,
         }
+    }
 }
 
-#[derive(Default)]
-pub struct NodeStatistics {
-    statistics_map: HashMap<NodeInfo, usize>,
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub enum Address {
+    /// Socket address (IP Address)
+    SocketAddress(SocketAddr),
+    /// Domain name address (SOCKS4a)
+    DomainNameAddress(String, u16),
 }
 
-impl NodeStatistics {
-    pub fn from_vec(node_infos: &Vec<NodeInfo>) -> Self {
-        let mut statistics_map: HashMap<NodeInfo, usize> = HashMap::with_capacity(node_infos.len());
-        for node_info in node_infos.iter() {
-            statistics_map.insert(*node_info, 0);
+impl From<NodeInfo> for Address {
+    fn from(value: NodeInfo) -> Self {
+        Address::SocketAddress(value.socket_addr)
+    }
+}
+
+impl fmt::Debug for Address {
+    #[inline]
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match *self {
+            Address::SocketAddress(ref addr) => write!(f, "{addr}"),
+            Address::DomainNameAddress(ref addr, ref port) => write!(f, "{addr}:{port}"),
         }
-        Self { statistics_map }
-    }
-
-    pub async fn get_least_connected_node(&self) -> NodeInfo {
-        let new_map: HashMap<NodeInfo, f32> = self
-            .statistics_map
-            .iter()
-            .map(|(&key, value)| (key, *value as f32 / key.node_number as f32))
-            .collect();
-        let target = new_map
-            .iter()
-            .min_by(|a, b| a.1.partial_cmp(b.1).unwrap())
-            .map(|(key, _)| key)
-            .unwrap()
-            .to_owned();
-        target
-    }
-
-    pub fn incre_count_by_node_info(&mut self, node_info: &NodeInfo) {
-        self.statistics_map
-            .entry(node_info.to_owned())
-            .and_modify(|v| *v += 1);
-    }
-
-    pub fn decre_count_by_node_info(&mut self, node_info: &NodeInfo) {
-        self.statistics_map
-            .entry(node_info.to_owned())
-            .and_modify(|v| *v -= 1);
     }
 }
 
-pub type StatisticsMap = Arc<Mutex<Option<NodeStatistics>>>;
+impl fmt::Display for Address {
+    #[inline]
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match *self {
+            Address::SocketAddress(ref addr) => write!(f, "{addr}"),
+            Address::DomainNameAddress(ref addr, ref port) => write!(f, "{addr}:{port}"),
+        }
+    }
+}
+
+impl From<SocketAddrV4> for Address {
+    fn from(s: SocketAddrV4) -> Address {
+        Address::SocketAddress(SocketAddr::V4(s))
+    }
+}
+
+impl From<(String, u16)> for Address {
+    fn from((dn, port): (String, u16)) -> Address {
+        Address::DomainNameAddress(dn, port)
+    }
+}
+
+impl From<(&str, u16)> for Address {
+    fn from((dn, port): (&str, u16)) -> Address {
+        Address::DomainNameAddress(dn.to_owned(), port)
+    }
+}
+
+impl From<&Address> for Address {
+    fn from(addr: &Address) -> Address {
+        addr.clone()
+    }
+}
+
+impl From<SocketAddr> for Address {
+    fn from(s: SocketAddr) -> Address {
+        Address::SocketAddress(s)
+    }
+}
+
+impl From<(IpAddr, u16)> for Address {
+    fn from((ip, port): (IpAddr, u16)) -> Address {
+        match ip {
+            IpAddr::V4(ip) => Address::from(SocketAddr::new(IpAddr::V4(ip), port)),
+            IpAddr::V6(ip) => Address::from(SocketAddr::new(IpAddr::V6(ip), port)),
+        }
+    }
+}
