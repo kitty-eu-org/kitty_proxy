@@ -463,7 +463,7 @@ pub async fn serve_connection(
 
     let rule = match_proxy.traffic_stream(&Host::from(&host));
     drop(match_proxy);
-    info!("Socks5 [TCP] {} {} connect", host.to_string(), rule);
+    info!("HTTP [TCP] {} {} connect", host.to_string(), rule);
     let is_direct = match rule {
         TrafficStreamRule::Reject => {
             return Ok(Response::new(empty_body()));
@@ -503,7 +503,7 @@ pub async fn serve_connection(
                 Err(e) => error!("upgrade error: {}", e),
             }
         });
-
+        println!("upgrade success");
         return Ok(Response::new(empty_body()));
     }
     let stream = TcpStream::connect(target_host.to_string()).await.unwrap();
@@ -531,4 +531,43 @@ pub async fn serve_connection(
         banlancer_ref.decre_count_by_node_info(&node_info.unwrap());
     }
     Ok(resp.map(|b| b.boxed()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use anyhow::Ok;
+    use anyhow::Result;
+    use std::net::{IpAddr, Ipv4Addr};
+    use std::str::FromStr;
+    use std::thread;
+    use std::time::Duration;
+    use std::{path::PathBuf, sync::Arc};
+    use tokio::sync::{watch, RwLock};
+
+    #[tokio::test]
+    async fn it_works() -> Result<()> {
+        let mut proxy = HttpProxy::new("127.0.0.1", 10089, None).await?;
+        let geoip_file = "/Users/hezhaozhao/myself/Furious/Furious/Data/xray/geoip.dat";
+        let geosite_file = "/Users/hezhaozhao/myself/Furious/Furious/Data/xray/geosite.dat";
+        let match_proxy = MatchProxy::from_geo_dat(
+            Some(&PathBuf::from_str(geoip_file).unwrap()),
+            Some(&PathBuf::from_str(geosite_file).unwrap()),
+        )
+        .unwrap();
+        let arc_match_proxy = Arc::new(RwLock::new(match_proxy));
+
+        let (http_kill_tx, mut http_kill_rx) = watch::channel(false);
+        let mut http_vpn_node_infos = Vec::new();
+        http_vpn_node_infos.push(NodeInfo::new(
+            IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
+            20171,
+            1,
+        ));
+        let _ = proxy
+            .serve(arc_match_proxy, &mut http_kill_rx, http_vpn_node_infos)
+            .await;
+        thread::sleep(Duration::from_secs(1000000000));
+        Ok(())
+    }
 }
