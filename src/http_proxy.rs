@@ -1,28 +1,32 @@
-#![forbid(unsafe_code)]
+use std::borrow::Borrow;
+use std::io::ErrorKind;
+use std::net::Incoming;
+use std::net::IpAddr;
+use std::net::Ipv4Addr;
+use std::net::Ipv6Addr;
+use std::str::FromStr;
+use std::sync::Arc;
+use std::time::Duration;
+use std::{fmt, io};
 
+use anyhow::anyhow;
+use anyhow::Result;
+use http_body_util::{combinators::BoxBody, BodyExt};
 use hyper::body::{Body, Bytes};
 use hyper::client::conn::http1::Builder;
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::upgrade::Upgraded;
+use hyper::{
+    body,
+    header::{self, HeaderValue},
+    http::uri::{Authority, Scheme},
+    HeaderMap, Method, Request, Response, StatusCode, Uri, Version,
+};
 use hyper_util::client::legacy::Client;
 use hyper_util::rt::TokioIo;
 use log::trace;
 use log::{debug, error, info, warn};
-
-use anyhow::anyhow;
-use anyhow::Result;
-use std::io::ErrorKind;
-use std::net::IpAddr;
-use std::net::Ipv4Addr;
-use std::net::Ipv6Addr;
-use std::net::SocketAddr;
-use std::net::SocketAddrV4;
-use std::ops::Add;
-use std::str::FromStr;
-use std::sync::Arc;
-use std::time::Duration;
-use std::{fmt, io};
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::watch::Receiver;
@@ -36,15 +40,6 @@ use crate::traffic_diversion::TrafficStreamRule;
 use crate::traits::BanlancerTrait;
 use crate::types::{Address, KittyProxyError, NodeInfo, ResponseCode};
 use crate::MatchProxy;
-
-use hyper::{
-    body,
-    header::{self, HeaderValue},
-    http::uri::{Authority, Scheme},
-    HeaderMap, Method, Request, Response, StatusCode, Uri, Version,
-};
-
-use http_body_util::{combinators::BoxBody, BodyExt};
 
 pub fn host_addr(uri: &Uri) -> Option<Address> {
     match uri.authority() {
@@ -64,74 +59,6 @@ fn make_bad_request() -> Result<Response<BoxBody<Bytes, hyper::Error>>, hyper::E
         .status(StatusCode::BAD_REQUEST)
         .body(empty_body())
         .unwrap())
-}
-
-fn make_internal_server_error() -> Result<Response<BoxBody<Bytes, hyper::Error>>, hyper::Error> {
-    Ok(Response::builder()
-        .status(StatusCode::INTERNAL_SERVER_ERROR)
-        .body(empty_body())
-        .unwrap())
-}
-
-fn get_extra_headers(headers: header::GetAll<HeaderValue>) -> Vec<String> {
-    let mut extra_headers = Vec::new();
-    for connection in headers {
-        if let Ok(conn) = connection.to_str() {
-            // close is a command instead of a header
-            if conn.eq_ignore_ascii_case("close") {
-                continue;
-            }
-            for header in conn.split(',') {
-                let header = header.trim();
-                extra_headers.push(header.to_owned());
-            }
-        }
-    }
-    extra_headers
-}
-
-fn clear_hop_headers(headers: &mut HeaderMap<HeaderValue>) {
-    // Clear headers indicated by Connection and Proxy-Connection
-    let mut extra_headers = get_extra_headers(headers.get_all("Connection"));
-    extra_headers.extend(get_extra_headers(headers.get_all("Proxy-Connection")));
-
-    for header in extra_headers {
-        while headers.remove(&header).is_some() {}
-    }
-
-    // https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Connection
-    const HOP_BY_HOP_HEADERS: [&str; 9] = [
-        "Keep-Alive",
-        "Transfer-Encoding",
-        "TE",
-        "Connection",
-        "Trailer",
-        "Upgrade",
-        "Proxy-Authorization",
-        "Proxy-Authenticate",
-        "Proxy-Connection", // Not standard, but many implementations do send this header
-    ];
-
-    for header in &HOP_BY_HOP_HEADERS {
-        while headers.remove(*header).is_some() {}
-    }
-}
-
-fn set_conn_keep_alive(version: Version, headers: &mut HeaderMap<HeaderValue>, keep_alive: bool) {
-    match version {
-        Version::HTTP_09 | Version::HTTP_10 => {
-            // HTTP/1.0 close connection by default
-            if keep_alive {
-                headers.insert("Connection", HeaderValue::from_static("keep-alive"));
-            }
-        }
-        _ => {
-            // HTTP/1.1, HTTP/2, HTTP/3 keep-alive connection by default
-            if !keep_alive {
-                headers.insert("Connection", HeaderValue::from_static("close"));
-            }
-        }
-    }
 }
 
 pub fn authority_addr(scheme_str: Option<&str>, authority: &Authority) -> Option<Address> {
@@ -252,97 +179,54 @@ fn get_addr_from_header(req: &mut Request<body::Incoming>) -> Result<Address, ()
     }
 }
 
-fn get_keep_alive_val(values: header::GetAll<HeaderValue>) -> Option<bool> {
-    let mut conn_keep_alive = None;
-    for value in values {
-        if let Ok(value) = value.to_str() {
-            if value.eq_ignore_ascii_case("close") {
-                conn_keep_alive = Some(false);
-            } else {
-                for part in value.split(',') {
-                    let part = part.trim();
-                    if part.eq_ignore_ascii_case("keep-alive") {
-                        conn_keep_alive = Some(true);
-                        break;
-                    }
-                }
-            }
-        }
-    }
-    conn_keep_alive
-}
-
-pub fn check_keep_alive(
-    version: Version,
-    headers: &HeaderMap<HeaderValue>,
-    check_proxy: bool,
-) -> bool {
-    // HTTP/1.1, HTTP/2, HTTP/3 keeps alive by default
-    let mut conn_keep_alive = !matches!(version, Version::HTTP_09 | Version::HTTP_10);
-
-    if check_proxy {
-        // Modern browsers will send Proxy-Connection instead of Connection
-        // for HTTP/1.0 proxies which blindly forward Connection to remote
-        //
-        // https://tools.ietf.org/html/rfc7230#appendix-A.1.2
-        if let Some(b) = get_keep_alive_val(headers.get_all("Proxy-Connection")) {
-            conn_keep_alive = b
-        }
-    }
-
-    // Connection will replace Proxy-Connection
-    //
-    // But why client sent both Connection and Proxy-Connection? That's not standard!
-    if let Some(b) = get_keep_alive_val(headers.get_all("Connection")) {
-        conn_keep_alive = b
-    }
-
-    conn_keep_alive
-}
-
-pub struct HttpReply {
-    buf: Vec<u8>,
-}
-
-impl HttpReply {
-    pub fn new(status: ResponseCode) -> Self {
-        let mut buffer: Vec<u8> = Vec::new();
-        let response = format!(
-            "HTTP/1.1 {} Proxy Error\r\n\
-             Content-Type: text/plain\r\n\
-             Content-Length: {}\r\n\
-             \r\n\
-             Proxy Error",
-            status as usize, 11
-        );
-
-        buffer.extend_from_slice(response.as_bytes());
-        Self { buf: buffer }
-    }
-
-    pub async fn send<T>(&self, stream: &mut T) -> io::Result<()>
-    where
-        T: AsyncRead + AsyncWrite + Send + Unpin + 'static,
-    {
-        stream.write_all(&self.buf[..]).await?;
-        Ok(())
-    }
-}
-
-async fn tunnel(upgraded: Upgraded, addr: String) -> std::io::Result<()> {
+async fn tunnel(upgraded: Upgraded, target_host: String, is_direct: bool) -> std::io::Result<()> {
     // Connect to remote server
-    let mut server = TcpStream::connect(addr).await?;
     let mut upgraded = TokioIo::new(upgraded);
-
-    // Proxying data
+    let mut target_stream = TcpStream::connect(&target_host).await.unwrap();
+    // let (from_client, from_server) = if !is_direct {
+    //     let mut tls_stream = connect_https(target_stream, target_host.as_str()).await;
+    //     let (from_client, from_server) =
+    //         tokio::io::copy_bidirectional(&mut upgraded, &mut tls_stream).await?;
+    //     (from_client, from_server)
+    // } else {
+    //     let (from_client, from_server) =
+    //         tokio::io::copy_bidirectional(&mut upgraded, &mut target_stream).await?;
+    //     (from_client, from_server)
+    // };
     let (from_client, from_server) =
-        tokio::io::copy_bidirectional(&mut upgraded, &mut server).await?;
+        tokio::io::copy_bidirectional(&mut upgraded, &mut target_stream).await?;
 
-    // Print message when done
     println!(
         "client wrote {} bytes and received {} bytes",
         from_client, from_server
     );
+
+    Ok(())
+}
+
+async fn send_connect_req(
+    target_host: Address,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let target_stream = TcpStream::connect(target_host.to_string()).await.unwrap();
+    let io: TokioIo<TcpStream> = TokioIo::new(target_stream);
+    let (mut sender, conn) = Builder::new()
+        .preserve_header_case(true)
+        .title_case_headers(true)
+        .handshake(io)
+        .await?;
+    let req = Request::builder()
+        .method("CONNECT")
+        .uri(format!("http://{}", target_host.to_string()))
+        .body(empty_body())
+        .unwrap();
+
+    tokio::task::spawn(async move {
+        if let Err(err) = conn.await {
+            error!("Connection failed: {:?}", err);
+        }
+    });
+
+    let resp = sender.send_request(req).await.unwrap();
 
     Ok(())
 }
@@ -428,45 +312,19 @@ impl HttpProxy {
     }
 }
 
-pub async fn connect_https(stream: TcpStream ,domain: &str) -> io::Result<ProxyHttpStream> {
-    use native_tls::TlsConnector;
-
-    let cx = match TlsConnector::builder().request_alpns(&["h2", "http/1.1"]).build() {
-        Ok(c) => c,
-        Err(err) => {
-            return Err(io::Error::new(ErrorKind::Other, format!("tls build: {err}")));
-        }
-    };
-    let cx = tokio_native_tls::TlsConnector::from(cx);
-
-    match cx.connect(domain, stream).await {
-        Ok(s) => {
-            let negotiated_h2 = match s.get_ref().negotiated_alpn() {
-                Ok(Some(alpn)) => alpn == b"h2",
-                Ok(None) => false,
-                Err(err) => {
-                    let ierr = io::Error::new(ErrorKind::Other, format!("tls alpn negotiate: {err}"));
-                    return Err(ierr);
-                }
-            };
-
-            Ok(ProxyHttpStream::Https(s, negotiated_h2))
-        }
-        Err(err) => {
-            let ierr = io::Error::new(ErrorKind::Other, format!("tls connect: {err}"));
-            Err(ierr)
-        }
-    }
-}
+// pub async fn connect_https(stream: TcpStream, domain: &str) -> TlsStream<TcpStream> {
+//     let tls_connector = tokio_native_tls::native_tls::TlsConnector::new().unwrap();
+//     let connector = TlsConnector::from(tls_connector);
+//     println!("domain: {domain}");
+//     let tls_stream = connector.connect("127.0.0.1", stream).await.unwrap();
+//     tls_stream
+// }
 
 pub async fn serve_connection(
     mut req: Request<body::Incoming>,
     match_proxy_share: Arc<RwLock<MatchProxy>>,
     arc_banlancer: ArcConnectionStatsBanlancer,
 ) -> hyper::Result<Response<BoxBody<Bytes, hyper::Error>>> {
-    // Parse URI
-    //
-    // Proxy request URI must contains a host
     let host: Address = match host_addr(req.uri()) {
         None => {
             if req.uri().authority().is_some() {
@@ -524,17 +382,14 @@ pub async fn serve_connection(
         // Establish a TCP tunnel
         // https://tools.ietf.org/html/draft-luotonen-web-proxy-tunneling-01
 
-         // Create a new HTTP CONNECT request
-
         debug!("HTTP CONNECT {}", target_host);
-
-        // Connect to Shadowsocks' remote
-        //
-        // FIXME: What STATUS should I return for connection error?
         tokio::task::spawn(async move {
             match hyper::upgrade::on(req).await {
                 Ok(upgraded) => {
-                    if let Err(e) = tunnel(upgraded, target_host.to_string()).await {
+                    println!("target_host: {:?}", target_host);
+
+                    send_connect_req(target_host);
+                    if let Err(e) = tunnel(upgraded, target_host, is_direct).await {
                         error!("server io error: {}", e);
                     };
                 }
@@ -545,12 +400,6 @@ pub async fn serve_connection(
         let response = Response::new(empty_body());
         println!("response: {:?}", response);
         return Ok(response);
-        // if is_direct {
-        //     return Ok(Response::new(empty_body()));
-        // } else {
-        //     return Ok(Response::new(empty_body()));
-
-        // }
     }
     let stream = TcpStream::connect(target_host.to_string()).await.unwrap();
     let io = TokioIo::new(stream);
@@ -581,21 +430,23 @@ pub async fn serve_connection(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use anyhow::Ok;
-    use anyhow::Result;
     use std::net::{IpAddr, Ipv4Addr};
     use std::str::FromStr;
     use std::thread;
     use std::time::Duration;
     use std::{path::PathBuf, sync::Arc};
+
+    use anyhow::Ok;
+    use anyhow::Result;
     use tokio::sync::{watch, RwLock};
+
+    use super::*;
 
     #[tokio::test]
     async fn it_works() -> Result<()> {
         let mut proxy = HttpProxy::new("127.0.0.1", 10089, None).await?;
-        let geoip_file = "/home/hezhaozhao/opensource/kitty/src-tauri/binaries/geoip.dat";
-        let geosite_file = "/home/hezhaozhao/opensource/kitty/src-tauri/binaries/geosite.dat";
+        let geoip_file = "/Users/hezhaozhao/myself/kitty/src-tauri/static/kitty_geoip.dat";
+        let geosite_file = "/Users/hezhaozhao/myself/kitty/src-tauri/static/kitty_geosite.dat";
         let match_proxy = MatchProxy::from_geo_dat(
             Some(&PathBuf::from_str(geoip_file).unwrap()),
             Some(&PathBuf::from_str(geosite_file).unwrap()),
@@ -607,7 +458,7 @@ mod tests {
         let mut http_vpn_node_infos = Vec::new();
         http_vpn_node_infos.push(NodeInfo::new(
             IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
-            26007,
+            20171,
             1,
         ));
         let _ = proxy
