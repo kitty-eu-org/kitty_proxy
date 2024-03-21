@@ -9,6 +9,8 @@ use std::sync::Arc;
 use std::time::Duration;
 use std::{fmt, io};
 
+use tokio_rustls::{rustls, TlsConnector};
+
 use anyhow::anyhow;
 use anyhow::Result;
 use http_body_util::{combinators::BoxBody, BodyExt};
@@ -179,28 +181,52 @@ fn get_addr_from_header(req: &mut Request<body::Incoming>) -> Result<Address, ()
     }
 }
 
-async fn tunnel(upgraded: Upgraded, target_host: String, is_direct: bool) -> std::io::Result<()> {
+async fn tunnel(
+    upgraded: Upgraded,
+    target_host: Address,
+    is_direct: bool,
+    origin_host: &str,
+) -> std::io::Result<()> {
     // Connect to remote server
     let mut upgraded = TokioIo::new(upgraded);
-    let mut target_stream = TcpStream::connect(&target_host).await.unwrap();
-    // let (from_client, from_server) = if !is_direct {
-    //     let mut tls_stream = connect_https(target_stream, target_host.as_str()).await;
-    //     let (from_client, from_server) =
-    //         tokio::io::copy_bidirectional(&mut upgraded, &mut tls_stream).await?;
-    //     (from_client, from_server)
-    // } else {
-    //     let (from_client, from_server) =
-    //         tokio::io::copy_bidirectional(&mut upgraded, &mut target_stream).await?;
-    //     (from_client, from_server)
-    // };
-    let (from_client, from_server) =
-        tokio::io::copy_bidirectional(&mut upgraded, &mut target_stream).await?;
+    let mut target_stream = TcpStream::connect(target_host.to_string()).await.unwrap();
+    if !is_direct {
+        println!("connector1");
+        // let domain = origin_host.split(":")[0];
+        let domain = origin_host.split(":").next().unwrap();
+        let content: String = format!("CONNECT {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: curl/7.81.0\r\nAccept: */*\r\nProxy-Connection: Keep-Alive\r\n\r\n", origin_host, domain);
+        target_stream.write_all(content.as_bytes()).await?;
 
+        let mut root_cert_store = rustls::RootCertStore::empty();
+        root_cert_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+
+        let config = rustls::ClientConfig::builder()
+            .with_root_certificates(root_cert_store)
+            .with_no_client_auth(); // i guess this was previously the default?
+        let connector = TlsConnector::from(Arc::new(config));
+        println!("connector3");
+        let domain = pki_types::ServerName::try_from(domain)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid dnsname"))?
+            .to_owned();
+        println!("connector domain: {:?}", domain);
+        let mut stream = connector.connect(domain, target_stream).await?;
+        let (from_client, from_server) =
+        tokio::io::copy_bidirectional(&mut upgraded, &mut stream).await?;
     println!(
         "client wrote {} bytes and received {} bytes",
         from_client, from_server
     );
-
+    }
+    else {
+        let (from_client, from_server) =
+        tokio::io::copy_bidirectional(&mut upgraded, &mut target_stream).await?;
+    println!(
+        "client wrote {} bytes and received {} bytes",
+        from_client, from_server
+    );
+    
+    }
+   
     Ok(())
 }
 
@@ -370,6 +396,7 @@ pub async fn serve_connection(
     } else {
         None
     };
+    let orogin_host = host.to_string();
 
     let target_host = if is_direct {
         host
@@ -388,8 +415,10 @@ pub async fn serve_connection(
                 Ok(upgraded) => {
                     println!("target_host: {:?}", target_host);
 
-                    send_connect_req(target_host);
-                    if let Err(e) = tunnel(upgraded, target_host, is_direct).await {
+                    // send_connect_req(target_host);
+                    if let Err(e) =
+                        tunnel(upgraded, target_host, is_direct, orogin_host.as_str()).await
+                    {
                         error!("server io error: {}", e);
                     };
                 }
@@ -432,21 +461,23 @@ pub async fn serve_connection(
 mod tests {
     use std::net::{IpAddr, Ipv4Addr};
     use std::str::FromStr;
-    use std::thread;
     use std::time::Duration;
     use std::{path::PathBuf, sync::Arc};
 
     use anyhow::Ok;
     use anyhow::Result;
     use tokio::sync::{watch, RwLock};
+    use tokio::time;
 
     use super::*;
 
     #[tokio::test]
     async fn it_works() -> Result<()> {
         let mut proxy = HttpProxy::new("127.0.0.1", 10089, None).await?;
-        let geoip_file = "/Users/hezhaozhao/myself/kitty/src-tauri/static/kitty_geoip.dat";
-        let geosite_file = "/Users/hezhaozhao/myself/kitty/src-tauri/static/kitty_geosite.dat";
+        // let geoip_file = "/Users/hezhaozhao/myself/kitty/src-tauri/static/kitty_geoip.dat";
+        let geoip_file = "/home/hezhaozhao/opensource/kitty/src-tauri/static/kitty_geoip.dat";
+        // let geosite_file = "/Users/hezhaozhao/myself/kitty/src-tauri/static/kitty_geosite.dat";
+        let geosite_file = "/home/hezhaozhao/opensource/kitty/src-tauri/static/kitty_geosite.dat";
         let match_proxy = MatchProxy::from_geo_dat(
             Some(&PathBuf::from_str(geoip_file).unwrap()),
             Some(&PathBuf::from_str(geosite_file).unwrap()),
@@ -464,7 +495,7 @@ mod tests {
         let _ = proxy
             .serve(arc_match_proxy, &mut http_kill_rx, http_vpn_node_infos)
             .await;
-        thread::sleep(Duration::from_secs(1000000000));
+        time::sleep(Duration::from_secs(1000000000));
         Ok(())
     }
 }
