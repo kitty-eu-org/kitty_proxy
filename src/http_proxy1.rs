@@ -1,14 +1,16 @@
 // This code was derived from the hudsucker repository:
 // https://github.com/omjadas/hudsucker
 
-use http::uri::{Authority, Scheme};
+use http::uri::Authority;
 use http_body_util::{combinators::BoxBody, BodyExt, Empty, Full};
+use hyper::http::uri::Scheme;
 use hyper::{
     header::Entry, service::service_fn, upgrade::Upgraded, Method, Request, Response, Uri,
 };
-use std::net::SocketAddr;
+use hyper_util::rt::TokioIo;
+use tokio::io::AsyncReadExt;
 use tokio::{
-    io::{AsyncRead, AsyncReadExt, AsyncWrite, ReadBuf},
+    io::{AsyncRead, AsyncWrite, ReadBuf},
     net::TcpStream,
 };
 
@@ -142,7 +144,8 @@ fn process_connect(
         match hyper::upgrade::on(&mut req).await {
             Ok(mut upgraded) => {
                 let mut buffer = [0; 4];
-                let bytes_read = match upgraded.r(&mut buffer).await {
+
+                let bytes_read = match upgraded.read(&mut buffer).await {
                     Ok(bytes_read) => bytes_read,
                     Err(e) => {
                         eprintln!("Failed to read from upgraded connection: {e}");
@@ -220,7 +223,7 @@ fn upgrade_websocket(
     let fut = async move {
         match websocket.await {
             Ok(ws) => {
-                if let Err(e) = self.handle_websocket(ws, req).await {
+                if let Err(e) = handle_websocket(ws, req).await {
                     eprintln!("Failed to handle websocket: {e}");
                 }
             }
@@ -235,7 +238,6 @@ fn upgrade_websocket(
 }
 
 async fn handle_websocket(
-    self,
     _server_socket: hyper_tungstenite::WebSocketStream<Upgraded>,
     _req: Request<()>,
 ) -> Result<(), tungstenite::Error> {
@@ -289,17 +291,13 @@ fn normalize_request<T>(mut req: Request<T>) -> Request<T> {
 
 #[cfg(test)]
 mod tests {
-    use std::net::{IpAddr, Ipv4Addr};
-    use std::str::FromStr;
-    use std::time::Duration;
-    use std::{path::PathBuf, sync::Arc};
+    use std::net::SocketAddr;
 
     use anyhow::Ok;
     use anyhow::Result;
+    use hyper::server::conn::http1;
     use hyper_util::rt::TokioIo;
     use tokio::net::TcpListener;
-    use tokio::sync::{watch, RwLock};
-    use tokio::time;
 
     use super::*;
 
