@@ -1,47 +1,36 @@
-use std::borrow::Borrow;
-use std::io::ErrorKind;
-use std::net::Incoming;
+use std::io;
 use std::net::IpAddr;
 use std::net::Ipv4Addr;
 use std::net::Ipv6Addr;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
-use std::{fmt, io};
 
-use tokio_rustls::{rustls, TlsConnector};
-
-use anyhow::anyhow;
 use anyhow::Result;
-use http_body_util::{combinators::BoxBody, BodyExt};
-use hyper::body::{Body, Bytes};
+use http_body_util::{BodyExt, combinators::BoxBody};
+use hyper::{
+    body,
+    http::uri::{Authority, Scheme}, Method, Request, Response, StatusCode, Uri
+};
+use hyper::body::Bytes;
 use hyper::client::conn::http1::Builder;
+use hyper::header::USER_AGENT;
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::upgrade::Upgraded;
-use hyper::{
-    body,
-    header::{self, HeaderValue},
-    http::uri::{Authority, Scheme},
-    HeaderMap, Method, Request, Response, StatusCode, Uri, Version,
-};
-use hyper_util::client::legacy::Client;
 use hyper_util::rt::TokioIo;
-use log::trace;
-use log::{debug, error, info, warn};
-use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
+use log::{debug, error, info, trace};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::watch::Receiver;
 use tokio::sync::Mutex;
 use tokio::sync::RwLock;
-use tokio::time::timeout;
-use url::{Host, ParseError, Url};
+use tokio::sync::watch::Receiver;
+use url::Host;
 
 use crate::banlancer::{ArcConnectionStatsBanlancer, ConnectionStatsBanlancer};
-use crate::traffic_diversion::TrafficStreamRule;
-use crate::traits::BanlancerTrait;
-use crate::types::{Address, KittyProxyError, NodeInfo, ResponseCode};
 use crate::MatchProxy;
+use crate::traffic_diversion::TrafficStreamRule;
+use crate::types::{Address, NodeInfo};
 
 pub fn host_addr(uri: &Uri) -> Option<Address> {
     match uri.authority() {
@@ -185,48 +174,51 @@ async fn tunnel(
     upgraded: Upgraded,
     target_host: Address,
     is_direct: bool,
-    origin_host: &str,
+    req: Request<body::Incoming>,
 ) -> std::io::Result<()> {
-    // Connect to remote server
     let mut upgraded = TokioIo::new(upgraded);
     let mut target_stream = TcpStream::connect(target_host.to_string()).await.unwrap();
     if !is_direct {
-        println!("connector1");
-        // let domain = origin_host.split(":")[0];
-        let domain = origin_host.split(":").next().unwrap();
-        let content: String = format!("CONNECT {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: curl/7.81.0\r\nAccept: */*\r\nProxy-Connection: Keep-Alive\r\n\r\n", origin_host, domain);
-        target_stream.write_all(content.as_bytes()).await?;
+        target_stream
+            .write_all(
+                format!(
+                    "CONNECT {} {:?}\r\nHost: {}\r\nUser-Agent: {}\r\nProxy-Connection: Keep-Alive\r\n\r\n",
+                    req.uri().to_string(),
+                    req.version(),
+                    req.uri().to_string(),
+                    req.headers()
+                        .get(USER_AGENT)
+                        .and_then(|v| v.to_str().ok())
+                        .unwrap_or("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.3")
+                )
+                    .as_bytes(),
+            )
+            .await
+            .unwrap();
 
-        let mut root_cert_store = rustls::RootCertStore::empty();
-        root_cert_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-
-        let config = rustls::ClientConfig::builder()
-            .with_root_certificates(root_cert_store)
-            .with_no_client_auth(); // i guess this was previously the default?
-        let connector = TlsConnector::from(Arc::new(config));
-        println!("connector3");
-        let domain = pki_types::ServerName::try_from(domain)
-            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid dnsname"))?
-            .to_owned();
-        println!("connector domain: {:?}", domain);
-        let mut stream = connector.connect(domain, target_stream).await?;
+        // 读取代理服务器响应
+        let mut resp_buf = [0; 1024];
+        let resp_len = target_stream.read(&mut resp_buf).await.unwrap();
+        let resp_str = String::from_utf8_lossy(&resp_buf[..resp_len]);
+        if !resp_str.starts_with("HTTP/1.1 200") {
+            eprintln!("Proxy server denied CONNECT request: {}", resp_str);
+            return Ok(());
+        }
+        // 确保代理服务器响应成功
         let (from_client, from_server) =
-        tokio::io::copy_bidirectional(&mut upgraded, &mut stream).await?;
-    println!(
-        "client wrote {} bytes and received {} bytes",
-        from_client, from_server
-    );
-    }
-    else {
+            tokio::io::copy_bidirectional(&mut upgraded, &mut target_stream).await?;
+        println!(
+            "client wrote {} bytes and received {} bytes",
+            from_client, from_server
+        );
+    } else {
         let (from_client, from_server) =
-        tokio::io::copy_bidirectional(&mut upgraded, &mut target_stream).await?;
-    println!(
-        "client wrote {} bytes and received {} bytes",
-        from_client, from_server
-    );
-    
+            tokio::io::copy_bidirectional(&mut upgraded, &mut target_stream).await?;
+        println!(
+            "client wrote {} bytes and received {} bytes",
+            from_client, from_server
+        );
     }
-   
     Ok(())
 }
 
@@ -293,18 +285,17 @@ impl HttpProxy {
         *banlancer = Some(ConnectionStatsBanlancer::from_vec(&vpn_node_infos));
         drop(banlancer);
         let banlancer_clone = Arc::clone(&self.banlancer);
-        // tokio::task::spawn(async move {
-        // loop {
+        tokio::task::spawn(async move {
+        loop {
         tokio::select! {
                     _ = async {
                         loop {
-                            let (stream, client_addr) = listener.accept().await.unwrap();
+                            let (stream, _client_addr) = listener.accept().await.unwrap();
                             let match_proxy_clone = match_proxy_clone.clone();
                             let banlancer_clone = banlancer_clone.clone();
-                            let local_addr = stream.local_addr().unwrap();
                             let io = TokioIo::new(stream);
 
-            // tokio::task::spawn(async move {
+            tokio::task::spawn(async move {
                 if let Err(err) = http1::Builder::new()
                     .preserve_header_case(true)
                     .title_case_headers(true)
@@ -320,7 +311,7 @@ impl HttpProxy {
                 {
                     println!("Failed to serve connection: {:?}", err);
                 }
-            // });
+            });
                         }
                     } => {}
                     _ =  async {
@@ -328,23 +319,15 @@ impl HttpProxy {
                                 return//该任务退出，别的也会停
                         }
                     } => {}
-                // }
+                }
         }
-        // });
+        });
     }
 
     pub fn is_serving(&self) -> bool {
         self.is_serve
     }
 }
-
-// pub async fn connect_https(stream: TcpStream, domain: &str) -> TlsStream<TcpStream> {
-//     let tls_connector = tokio_native_tls::native_tls::TlsConnector::new().unwrap();
-//     let connector = TlsConnector::from(tls_connector);
-//     println!("domain: {domain}");
-//     let tls_stream = connector.connect("127.0.0.1", stream).await.unwrap();
-//     tls_stream
-// }
 
 pub async fn serve_connection(
     mut req: Request<body::Incoming>,
@@ -379,7 +362,6 @@ pub async fn serve_connection(
     let match_proxy = match_proxy_share.read().await;
 
     let rule = match_proxy.traffic_stream(&Host::from(&host));
-    println!("rule: {:?}", rule);
     drop(match_proxy);
     info!("HTTP [TCP] {} {} connect", host.to_string(), rule);
     let is_direct = match rule {
@@ -396,38 +378,24 @@ pub async fn serve_connection(
     } else {
         None
     };
-    let orogin_host = host.to_string();
 
     let target_host = if is_direct {
         host
     } else {
         Address::from(node_info.unwrap())
     };
-    println!("req: {:?}", req);
-    // println!("req.extensions: {:?}", req.());
     if req.method() == Method::CONNECT {
-        // Establish a TCP tunnel
-        // https://tools.ietf.org/html/draft-luotonen-web-proxy-tunneling-01
-
-        debug!("HTTP CONNECT {}", target_host);
         tokio::task::spawn(async move {
-            match hyper::upgrade::on(req).await {
+            match hyper::upgrade::on(&mut req).await {
                 Ok(upgraded) => {
-                    println!("target_host: {:?}", target_host);
-
-                    // send_connect_req(target_host);
-                    if let Err(e) =
-                        tunnel(upgraded, target_host, is_direct, orogin_host.as_str()).await
-                    {
+                    if let Err(e) = tunnel(upgraded, target_host, is_direct, req).await {
                         error!("server io error: {}", e);
                     };
                 }
                 Err(e) => error!("upgrade error: {}", e),
             }
         });
-        println!("upgrade success");
         let response = Response::new(empty_body());
-        println!("response: {:?}", response);
         return Ok(response);
     }
     let stream = TcpStream::connect(target_host.to_string()).await.unwrap();
@@ -459,14 +427,14 @@ pub async fn serve_connection(
 
 #[cfg(test)]
 mod tests {
+    use std::{path::PathBuf, sync::Arc};
     use std::net::{IpAddr, Ipv4Addr};
     use std::str::FromStr;
     use std::time::Duration;
-    use std::{path::PathBuf, sync::Arc};
 
     use anyhow::Ok;
     use anyhow::Result;
-    use tokio::sync::{watch, RwLock};
+    use tokio::sync::{RwLock, watch};
     use tokio::time;
 
     use super::*;
@@ -474,15 +442,15 @@ mod tests {
     #[tokio::test]
     async fn it_works() -> Result<()> {
         let mut proxy = HttpProxy::new("127.0.0.1", 10089, None).await?;
-        // let geoip_file = "/Users/hezhaozhao/myself/kitty/src-tauri/static/kitty_geoip.dat";
-        let geoip_file = "/home/hezhaozhao/opensource/kitty/src-tauri/static/kitty_geoip.dat";
-        // let geosite_file = "/Users/hezhaozhao/myself/kitty/src-tauri/static/kitty_geosite.dat";
-        let geosite_file = "/home/hezhaozhao/opensource/kitty/src-tauri/static/kitty_geosite.dat";
+        let geoip_file = "/Users/hezhaozhao/myself/kitty/src-tauri/static/kitty_geoip.dat";
+        // let geoip_file = "/home/hezhaozhao/opensource/kitty/src-tauri/static/kitty_geoip.dat";
+        let geosite_file = "/Users/hezhaozhao/myself/kitty/src-tauri/static/kitty_geosite.dat";
+        // let geosite_file = "/home/hezhaozhao/opensource/kitty/src-tauri/static/kitty_geosite.dat";
         let match_proxy = MatchProxy::from_geo_dat(
             Some(&PathBuf::from_str(geoip_file).unwrap()),
             Some(&PathBuf::from_str(geosite_file).unwrap()),
         )
-        .unwrap();
+            .unwrap();
         let arc_match_proxy = Arc::new(RwLock::new(match_proxy));
 
         let (http_kill_tx, mut http_kill_rx) = watch::channel(false);
@@ -495,7 +463,7 @@ mod tests {
         let _ = proxy
             .serve(arc_match_proxy, &mut http_kill_rx, http_vpn_node_infos)
             .await;
-        time::sleep(Duration::from_secs(1000000000));
+        time::sleep(Duration::from_secs(1000000000)).await;
         Ok(())
     }
 }
