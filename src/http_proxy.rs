@@ -286,7 +286,7 @@ impl HttpProxy {
         drop(banlancer);
         let banlancer_clone = Arc::clone(&self.banlancer);
         tokio::task::spawn(async move {
-        loop {
+        // loop {
         tokio::select! {
                     _ = async {
                         loop {
@@ -320,7 +320,7 @@ impl HttpProxy {
                         }
                     } => {}
                 }
-        }
+        // }
         });
     }
 
@@ -442,10 +442,10 @@ mod tests {
     #[tokio::test]
     async fn it_works() -> Result<()> {
         let mut proxy = HttpProxy::new("127.0.0.1", 10089, None).await?;
-        let geoip_file = "/Users/hezhaozhao/myself/kitty/src-tauri/static/kitty_geoip.dat";
-        // let geoip_file = "/home/hezhaozhao/opensource/kitty/src-tauri/static/kitty_geoip.dat";
-        let geosite_file = "/Users/hezhaozhao/myself/kitty/src-tauri/static/kitty_geosite.dat";
-        // let geosite_file = "/home/hezhaozhao/opensource/kitty/src-tauri/static/kitty_geosite.dat";
+        // let geoip_file = "/Users/hezhaozhao/myself/kitty/src-tauri/static/kitty_geoip.dat";
+        let geoip_file = "/home/hezhaozhao/opensource/kitty/src-tauri/static/kitty_geoip.dat";
+        // let geosite_file = "/Users/hezhaozhao/myself/kitty/src-tauri/static/kitty_geosite.dat";
+        let geosite_file = "/home/hezhaozhao/opensource/kitty/src-tauri/static/kitty_geosite.dat";
         let match_proxy = MatchProxy::from_geo_dat(
             Some(&PathBuf::from_str(geoip_file).unwrap()),
             Some(&PathBuf::from_str(geosite_file).unwrap()),
@@ -457,7 +457,7 @@ mod tests {
         let mut http_vpn_node_infos = Vec::new();
         http_vpn_node_infos.push(NodeInfo::new(
             IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
-            20171,
+            1078,
             1,
         ));
         let _ = proxy
