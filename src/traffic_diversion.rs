@@ -166,7 +166,7 @@ impl MatchProxy {
                             plain_site_map.insert(domain.value, TrafficStreamRule::Proxy);
                         }
                         Type::Regex => direct_regex_sites.push(Regex::new(&domain.value.as_str())?),
-                        Type::RootDomain => {
+                        Type::Domain => {
                             let domain = parse_domain_name(domain.value.as_str());
                             let domain_root = match domain {
                                 Ok(root_domain) => match root_domain.root() {
@@ -404,8 +404,8 @@ mod tests {
 
     #[test]
     fn it_works() -> Result<()> {
-        let geoip_file = "E:\\opensource\\kitty\\src-tauri\\static\\geoip.dat";
-        let geosite_file = "E:\\opensource\\kitty\\src-tauri\\static\\geosite.dat";
+        let geoip_file = "/Users/hezhaozhao/myself/kitty_proxy/src/geo_files/geoip.dat";
+        let geosite_file = "/Users/hezhaozhao/myself/kitty_proxy/src/geo_files/geosite.dat";
         let mut ins = MatchProxy::from_geo_dat(
             Some(&PathBuf::from_str(geoip_file).unwrap()),
             Some(&PathBuf::from_str(geosite_file).unwrap()),

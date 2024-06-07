@@ -3,7 +3,7 @@ fn main() {
     let mut config = prost_build::Config::new();
     // config.type_attribute(".v2ray_config.Domain", "#[derive(Copy)]");
     // config.field_attribute(".v2ray_config", "#[derive(Copy)]");
-    config.extern_path(".google.protobuf.descriptor", "::prost-types");
+    // config.extern_path(".google.protobuf.descriptor", "::prost-types");
 
     config
         .out_dir("src")
