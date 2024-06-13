@@ -244,8 +244,7 @@ async fn send_connect_req(
         }
     });
 
-    let resp = sender.send_request(req).await.unwrap();
-
+    let resp = sender.send_request(req).await;
     Ok(())
 }
 

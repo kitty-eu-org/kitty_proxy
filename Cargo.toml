@@ -28,3 +28,8 @@ bytes = "1.4.0"
 [build-dependencies]
 prost = "0.7"
 prost-build = "0.7"
+
+
+[[example]]
+name = "proxy_example"
+path = "src/examples/proxy_example.rs"
