@@ -31,6 +31,11 @@ async fn main() -> Result<()> {
             24689,
             1,
         ));
+        // http_vpn_node_infos.push(NodeInfo::new(
+        //     IpAddr::V4(Ipv4Addr::new(192,168, 50,104)),
+        //     24656,
+        //     1,
+        // ));
         let _ = proxy
             .serve(arc_match_proxy, &mut http_kill_rx, http_vpn_node_infos)
             .await;
