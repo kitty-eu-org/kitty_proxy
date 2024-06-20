@@ -24,6 +24,8 @@ hyper = { version = "1", features = ["full"] }
 http-body-util = "0.1"
 hyper-util = { version = "0.1", features = ["full"] }
 bytes = "1.4.0"
+fast-socks5 = "0.9.6"
+tokio-stream = "0.1.15"
 
 [build-dependencies]
 prost = "0.7"
@@ -33,3 +35,8 @@ prost-build = "0.7"
 [[example]]
 name = "proxy_example"
 path = "src/examples/proxy_example.rs"
+
+
+[[example]]
+name = "socks_proxy_example"
+path = "src/examples/socks_proxy_example.rs"
