@@ -1,5 +1,5 @@
 use crate::v2ray_config::domain::Type;
-use crate::v2ray_config::{Cidr, GeoIpList, GeoSiteList};
+use crate::v2ray_config::{Cidr, GeoIpList, GeoSite, GeoSiteList};
 
 use addr::parse_domain_name;
 use anyhow::Result;
@@ -10,7 +10,7 @@ use regex::Regex;
 use std::collections::HashMap;
 use std::fmt;
 use std::fs::File;
-use std::io::Read;
+use std::io::{Read, Cursor};
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::path::PathBuf;
 use std::str::FromStr;
@@ -117,7 +117,23 @@ fn read_geosite_from_dat(geo_siet_file: Option<&PathBuf>) -> GeoSiteList {
         let mut file = File::open(site_file).expect("Failed to open file");
         let mut content = Vec::new();
         file.read_to_end(&mut content).expect("Failed to read file");
-        GeoSiteList::decode(&content[..]).expect("Failed to decode binary data")
+
+        // geosite.dat contains a stream of GeoSite messages, not a GeoSiteList
+        // We need to decode them sequentially
+        let mut cursor = std::io::Cursor::new(&content);
+        let mut entries = Vec::new();
+
+        while cursor.position() < content.len() as u64 {
+            match GeoSite::decode(&mut cursor) {
+                Ok(geo_site) => entries.push(geo_site),
+                Err(e) => {
+                    eprintln!("Warning: Failed to decode GeoSite at position {}: {}", cursor.position(), e);
+                    break;
+                }
+            }
+        }
+
+        GeoSiteList { entry: entries }
     } else {
         GeoSiteList::default()
     }
