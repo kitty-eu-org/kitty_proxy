@@ -147,26 +147,41 @@ impl MatchProxy {
         let mut ipv4_combiner = Ipv4CidrCombiner::new();
         let mut ipv6_combiner = Ipv6CidrCombiner::new();
         if let Some(gepip_file) = gepip_file {
-            let mut file = File::open(gepip_file).expect("Failed to open file");
-            let mut content = Vec::new();
-            file.read_to_end(&mut content).expect("Failed to read file");
-            let geo_ips = GeoIpList::decode(&content[..]).expect("Failed to decode binary data");
-
-            for geo_ip in geo_ips.entry.iter() {
-                if geo_ip.country_code.to_lowercase() == "cn" {
-                    for cidr in &geo_ip.cidr {
-                        if cidr.ip.len() == 4 {
-                            let ipv4_cidr = Ipv4Cidr::from_str(cidr.to_string().as_str()).unwrap();
-                            ipv4_combiner.push(ipv4_cidr);
-                        }
-                        if cidr.ip.len() == 8 {
-                            let ipv6_cidr = Ipv6Cidr::from_str(cidr.to_string().as_str()).unwrap();
-                            ipv6_combiner.push(ipv6_cidr);
+            match File::open(gepip_file) {
+                Ok(mut file) => {
+                    let mut content = Vec::new();
+                    if let Err(e) = file.read_to_end(&mut content) {
+                        eprintln!("Warning: Failed to read GeoIP file {:?}: {}", gepip_file, e);
+                    } else {
+                        match GeoIpList::decode(&content[..]) {
+                            Ok(geo_ips) => {
+                                for geo_ip in geo_ips.entry.iter() {
+                                    if geo_ip.country_code.to_lowercase() == "cn" {
+                                        for cidr in &geo_ip.cidr {
+                                            if cidr.ip.len() == 4 {
+                                                if let Ok(ipv4_cidr) = Ipv4Cidr::from_str(cidr.to_string().as_str()) {
+                                                    ipv4_combiner.push(ipv4_cidr);
+                                                }
+                                            }
+                                            if cidr.ip.len() == 8 {
+                                                if let Ok(ipv6_cidr) = Ipv6Cidr::from_str(cidr.to_string().as_str()) {
+                                                    ipv6_combiner.push(ipv6_cidr);
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                eprintln!("Warning: Failed to decode GeoIP file {:?}: {}. GeoIP rules will not be applied.", gepip_file, e);
+                            }
                         }
                     }
                 }
+                Err(e) => {
+                    eprintln!("Warning: Failed to open GeoIP file {:?}: {}. GeoIP rules will not be applied.", gepip_file, e);
+                }
             }
-        } else {
         }
         let mut plain_site_map: HashMap<String, TrafficStreamRule> = HashMap::new();
         let mut direct_regex_sites: Vec<Regex> = Vec::new();
